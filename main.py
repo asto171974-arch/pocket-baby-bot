@@ -13,7 +13,7 @@ last_signals = deque(maxlen=3)
 
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200); self.end_headers(); self.wfile.write(b"PRO CLEAN LIVE")
+        self.send_response(200); self.end_headers(); self.wfile.write(b"PRO CLEAN LIVE")def do_HEAD(self):self.send_response(200);self.end_headers()
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
