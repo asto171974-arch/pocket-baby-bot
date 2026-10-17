@@ -1,4 +1,3 @@
-python-telegram-bot
-yfinance
-flask
+ccxt 
 pandas
+python-telegram-bot 
