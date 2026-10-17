@@ -1,6 +1,5 @@
-import os, asyncio, logging
-from threading import Thread
-from flask import Flask
+import os, asyncio, logging, threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Bot
 import yfinance as yf
 
@@ -8,24 +7,37 @@ TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 bot = Bot(token=TOKEN)
 
-# --- КОСТЫЛЬ ДЛЯ RENDER WEB SERVICE ---
-app = Flask(__name__)
-@app.route('/')
-def home(): return "Brodaga PRO CLEAN is alive"
+# === ФИКС ДЛЯ RENDER - ОТКРЫВАЕМ ПОРТ ===
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is alive")
+
 def run_web():
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
-Thread(target=run_web, daemon=True).start()
-# -------------------------------------
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), Handler)
+    server.serve_forever()
+
+threading.Thread(target=run_web, daemon=True).start()
+# === КОНЕЦ ФИКСА ===
 
 ASSETS = {
-    "EUR/USD (OTC)": "EURUSD=X",
-    "EUR/GBP (OTC)": "EURGBP=X",
-    "GOLD (OTC)": "GC=F",
-    "APPLE (OTC)": "AAPL",
-    "TESLA (OTC)": "TSLA"
+    "TOYOTA (OTC)": "TM",
+    "VISA (OTC)": "V",
+    "EUR/CAD (OTC)": "EURCAD=X",
+    "AUD/JPY (OTC)": "AUDJPY=X",
+    "USD/CAD (OTC)": "USDCAD=X",
+    "USD/CNH (OTC)": "USDCNH=X",
+    "AUD/CHF (OTC)": "AUDCHF=X",
+    "NZD/USD (OTC)": "NZDUSD=X",
+    "AUD/USD (OTC)": "AUDUSD=X",
+    "CAD/JPY (OTC)": "CADJPY=X",
+    "EUR/AUD (OTC)": "EURAUD=X",
+    "GBP/CHF (OTC)": "GBPCHF=X"
 }
 
-def get_clean_signal(ticker):
+def analyze(ticker):
     try:
         df = yf.download(ticker, period="1d", interval="5m", progress=False, auto_adjust=True)
         if len(df) < 35: return None
@@ -34,26 +46,25 @@ def get_clean_signal(ticker):
         gain = delta.where(delta>0,0).rolling(14).mean()
         loss = -delta.where(delta<0,0).rolling(14).mean()
         rsi = 100 - (100 / (1 + gain/loss))
-        r = float(rsi.iloc[-1])
-        if 45 < r < 55: return None
+        rsi_v = float(rsi.iloc[-1])
+        if 45 < rsi_v < 55: return None
         ema9 = float(close.ewm(9).mean().iloc[-1])
         ema21 = float(close.ewm(21).mean().iloc[-1])
-        if r < 38 and ema9 > ema21: return "ВВЕРХ 🟢", f"RSI {r:.0f}"
-        if r > 62 and ema9 < ema21: return "ВНИЗ 🔴", f"RSI {r:.0f}"
-        return None
+        return ("ВВЕРХ 🟢", f"RSI {rsi_v:.0f}") if rsi_v < 40 and ema9 > ema21 else ("ВНИЗ 🔴", f"RSI {rsi_v:.0f}") if rsi_v > 60 and ema9 < ema21 else None
     except: return None
 
-async def loop():
+async def main():
+    logging.info("Bot PRO CLEAN started")
     while True:
         for name, ticker in ASSETS.items():
-            res = get_clean_signal(ticker)
+            res = analyze(ticker)
             if res:
-                d, reason = res
-                await bot.send_message(chat_id=CHANNEL_ID, text=f"💎 ЧИСТЫЙ 92%\nАктив: {name}\nСигнал: {d}\nФильтр: {reason} + тренд\nЭкспирация: 5м")
+                d, r = res
+                await bot.send_message(chat_id=CHANNEL_ID, text=f"🎯 {name}\n{d}\n{r}\nВыплата 92%")
                 await asyncio.sleep(1200)
                 break
         await asyncio.sleep(120)
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    asyncio.run(loop())
+    asyncio.run(main())
