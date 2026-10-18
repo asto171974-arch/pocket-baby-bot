@@ -1,84 +1,103 @@
-import os
-import asyncio
-import logging
-import datetime
-import threading
-import random
-from collections import deque
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from telegram import Bot
+import time, random, pandas as pd
+from datetime import datetime
 import httpx
-import pandas as pd
 
-TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_ID = os.getenv("CHANNEL_ID")
-bot = Bot(token=TOKEN)
+# --- ТВОИ НАСТРОЙКИ ---
+BOT_TOKEN = "ТВОЙ_ТОКЕН"
+CHANNEL_ID = "@ТВОЙ_КАНАЛ"
 
-PAIRS = ["EUR/CAD (OTC)", "AUD/JPY (OTC)", "USD/CAD (OTC)", "NZD/USD (OTC)", "AUD/USD (OTC)"]
-last_signals = deque(maxlen=3)
+# Симуляция свечей, потом подключим твой API покета
+def get_candles(n=500):
+    # Тут ты подставишь реальные свечи с Pocket Option
+    # Пока для теста генерим, но логика уже боевая
+    return [random.uniform(1.0, 1.2) for _ in range(n)]
 
-# Веб-сервер для Render
-class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK - BOT LIVE")
-    def do_HEAD(self):
-        self.send_response(200)
-        self.end_headers()
+def rsi(prices, period=14):
+    df = pd.Series(prices)
+    delta = df.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
 
-def run_web():
-    port = int(os.environ.get("PORT", 10000))
-    HTTPServer(("0.0.0.0", port), Handler).serve_forever()
+def check_history(prices, curr_rsi):
+    """Ищем исторические совпадения"""
+    rsi_series = rsi(prices)
+    similar = 0
+    wins_up = 0
+    wins_down = 0
+    
+    for i in range(50, len(prices)-10):
+        if abs(rsi_series.iloc[i] - curr_rsi) < 2.5: # Нашли похожее RSI
+            similar += 1
+            # Что было дальше?
+            future = prices[i+5] - prices[i]
+            if future > 0: wins_up += 1
+            else: wins_down += 1
+    
+    if similar == 0: return 50, 0
+    win_rate = max(wins_up, wins_down) / similar * 100
+    direction = "ВВЕРХ 🟢" if wins_up > wins_down else "ВНИЗ 🔴"
+    return win_rate, direction, similar
 
-threading.Thread(target=run_web, daemon=True).start()
+def is_otc_manipulation(prices):
+    """Фильтр от нарисованного графика"""
+    last_10 = prices[-10:]
+    volatility = (max(last_10) - min(last_10)) / max(last_10) * 100
+    if volatility < 0.03: # Слишком ровный - крутят
+        return True
+    return False
 
-async def get_signal():
-    try:
-        async with httpx.AsyncClient() as c:
-            r = await c.get("https://api.kraken.com/0/public/OHLC?pair=BTCUSD&interval=5", timeout=15)
-            data = r.json()
-            k = list(data['result'].keys())[0]
-            rows = data['result'][k]
-            df = pd.DataFrame(rows)
-            close = df[4].astype(float)
-            delta = close.diff()
-            gain = delta.where(delta > 0, 0).rolling(14).mean()
-            loss = -delta.where(delta < 0, 0).rolling(14).mean()
-            rsi = 100 - (100 / (1 + gain / loss))
-            rsi_v = float(rsi.iloc[-1])
-            ema9 = float(close.ewm(9).mean().iloc[-1])
-            ema21 = float(close.ewm(21).mean().iloc[-1])
-            if 45 < rsi_v < 55:
-                return None
-            if rsi_v < 42 and ema9 > ema21:
-                return "ВВЕРХ 🟢", f"RSI {rsi_v:.0f}"
-            if rsi_v > 58 and ema9 < ema21:
-                return "ВНИЗ 🔴", f"RSI {rsi_v:.0f}"
-    except Exception as e:
-        logging.error(f"ERR {e}")
-        return None
+async def send_signal(text):
+    async with httpx.AsyncClient() as client:
+        await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                          json={"chat_id": CHANNEL_ID, "text": text, "parse_mode": "HTML"})
 
 async def main():
-    logging.info("BOT FIXED AND LIVE")
+    print("БРОДЯГА PRO MAX ЗАПУЩЕН...")
     while True:
-        now = datetime.datetime.now()
-        while last_signals and (now - last_signals[0]).seconds > 3600:
-            last_signals.popleft()
-        if len(last_signals) >= 3:
-            await asyncio.sleep(600)
-            continue
-        res = await get_signal()
-        if res:
-            d, reason = res
-            asset = random.choice(PAIRS)
-            text = f"🎯 ЧИСТЫЙ 92%\n\nАктив: {asset}\nНаправление: {d}\n{reason}\nЭкспирация: 5 мин"
-            await bot.send_message(chat_id=CHANNEL_ID, text=text)
-            last_signals.append(now)
-            await asyncio.sleep(1200)
-        else:
-            await asyncio.sleep(120)
+        try:
+            prices = get_candles(500)
+            curr_rsi = rsi(prices).iloc[-1]
+            
+            # Фильтр 1: ОТС крутилка
+            if is_otc_manipulation(prices):
+                print(f"{datetime.now()} - График крутят, пропуск")
+                time.sleep(120)
+                continue
+
+            # Фильтр 2: Только сильные RSI зоны
+            if curr_rsi > 58 or curr_rsi < 42:
+                win_rate, hist_direction, similar_count = check_history(prices, curr_rsi)
+                
+                # Шлем только если история подтверждает >65%
+                if win_rate >= 65 and similar_count >= 3:
+                    msg = f"""
+🔥 <b>БРОДЯГА PRO SIGNAL</b> 🔥
+
+📊 Актив: ОТС (любой)
+📈 RSI: {curr_rsi:.1f}
+🧠 Исторических совпадений: {similar_count}
+✅ Винрейт по истории: {win_rate:.0f}%
+➡️ Направление: {hist_direction}
+
+⏰ Время: {datetime.now().strftime('%H:%M:%S')}
+⚠️ Уверенность: {win_rate:.0f}% - ЗАХОДИМ!
+
+#PRO #OTC
+                    """
+                    await send_signal(msg)
+                    print(f"SIGNAL SENT: {hist_direction} {win_rate}%")
+                    time.sleep(900) # Пауза 15 мин после сигнала
+                else:
+                    print(f"RSI {curr_rsi:.1f} но история слабая {win_rate:.0f}% ({similar_count}) - пропуск")
+            
+            time.sleep(60) # Проверка каждую минуту
+            
+        except Exception as e:
+            print(f"Ошибка: {e}")
+            time.sleep(60)
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    import asyncio
     asyncio.run(main())
