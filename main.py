@@ -1,10 +1,11 @@
+import os
 import time, random, pandas as pd
 from datetime import datetime
 import httpx
 
-# --- ТВОИ НАСТРОЙКИ ---
-BOT_TOKEN = "ТВОЙ_ТОКЕН"
-CHANNEL_ID = "@ТВОЙ_КАНАЛ"
+# --- ТВОИ НАСТРОЙКИ - БЕРЕМ ИЗ RENDER---
+BOT_TOKEN = os.getenv("BOT_ТОКЕН")
+CHANNEL_ID = os.getenv("CHANNEL_ID")
 
 # Симуляция свечей, потом подключим твой API покета
 def get_candles(n=500):
