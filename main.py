@@ -2,9 +2,26 @@ import os
 import time, random, pandas as pd
 from datetime import datetime
 import httpx
+from threading import Thread
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# --- ТВОИ НАСТРОЙКИ - БЕРЕМ ИЗ RENDER---
-BOT_TOKEN = os.getenv("BOT_ТОКЕН")
+# --- ФЕЙКОВЫЙ СЕРВЕР ЧТОБЫ RENDER НЕ РУГАЛСЯ (БЕСПЛАТНО) ---
+class FakeHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running PRO")
+
+def run_fake_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), FakeHandler)
+    server.serve_forever()
+
+Thread(target=run_fake_server, daemon=True).start()
+# --- КОНЕЦ ФЕЙК СЕРВЕРА ---
+
+# --- ТВОИ НАСТРОЙКИ - БЕРЕМ ИЗ RENDER ---
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
 # Симуляция свечей, потом подключим твой API покета
