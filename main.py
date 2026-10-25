@@ -109,7 +109,7 @@ async def send_signal(text):
 # --- 7. MAIN LOOP ---
 async def main():
     print("БРОДЯГА PRO V2 MAX ЗАПУЩЕН...")
-    pairs_to_check = MAJORS + ["EUR/USD-OTC", "GBP/USD-OTC"]
+    pairs_to_check = MAJORS + ["EUR/USD-OTC","EUR/GBP-OTC","EUR/JPY-OTC","EUR/CAD-OTC","USD/CAD-OTC","AUD/JPY-OTC","USD/CNH-OTC","AUD/CHF-OTC","CAD/JPY-OTC","EUR/AUD-OTC","GBP/USD-OTC"]
     
     while True:
         try:
