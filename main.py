@@ -9,12 +9,11 @@ from datetime import datetime, timezone
 from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# --- 1. ФЕЙК СЕРВЕР ДЛЯ RENDER ---
 class FakeHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Brodyaga V3.1 FERRARI running")
+        self.wfile.write(b"Brodyaga V3.1 FIXED running")
     def log_message(self, *args): return
 
 def run_fake_server():
@@ -23,7 +22,6 @@ def run_fake_server():
 
 Thread(target=run_fake_server, daemon=True).start()
 
-# --- 2. КОНФИГ ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 TWELVE_KEY = os.getenv("TWELVEDATA_API_KEY")
@@ -49,7 +47,6 @@ SLEEP_BETWEEN_PAIRS = 2
 SLEEP_BETWEEN_ROUNDS = 60
 COOLDOWN_SAME_PAIR = 1200
 
-# --- 3. СВЕЧИ ---
 def get_candles(pair="OTC", n=500):
     if "/" in pair and "OTC" not in pair and TWELVE_KEY:
         try:
@@ -69,7 +66,7 @@ def calc_rsi(prices, period=14):
     df = pd.Series(prices)
     delta = df.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean())
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
     rs = gain / loss
     rsi_series = 100 - (100 / (1 + rs))
     return rsi_series
@@ -79,7 +76,6 @@ def is_otc_manipulation(prices):
     volatility = (max(last_10) - min(last_10)) / max(last_10) * 100
     return volatility < 0.02
 
-# --- 4. ОТС - ИСТОРИЯ ---
 def check_history_otc(prices, curr_rsi):
     rsi_series = calc_rsi(prices)
     ema = pd.Series(prices).ewm(span=21).mean()
@@ -100,7 +96,6 @@ def check_history_otc(prices, curr_rsi):
     direction = "ВВЕРХ 🟢" if wins_up > wins_down else "ВНИЗ 🔴"
     return win_rate, direction, similar
 
-# --- 5. МАЖОРЫ - КЛАСТЕР ТЕКУЩИХ ---
 def analyze_majors_cluster(current_pair, curr_rsi):
     if len(majors_cache) < 5:
         return 50, "НЕТ", 0
@@ -138,9 +133,8 @@ async def send_signal(text):
     except Exception as e:
         print(f"Send error: {e}")
 
-# --- 7. MAIN LOOP V3.1 ---
 async def main():
-    print("БРОДЯГА V3.1 FERRARI 50 PAIRS ЗАПУЩЕН... С ВРЕМЕНЕМ ВВЕРХ/ВНИЗ")
+    print("БРОДЯГА V3.1 FIXED ЗАПУЩЕН")
     all_pairs = MAJORS + OTC_PAIRS
     random.shuffle(all_pairs)
     
@@ -183,23 +177,19 @@ async def main():
 
                     if win_rate >= needed_winrate and similar >= needed_similar:
                         time_now = datetime.now().strftime('%H:%M:%S')
-                        
                         if curr_rsi <= 28 or curr_rsi >= 72 or similar >= 15:
                             expire_text = "3 МИНУТЫ"
                             expire_emoji = "⏰⏰⏰"
                         else:
                             expire_text = "2 МИНУТЫ"
                             expire_emoji = "⏰"
-
                         if "ВВЕРХ" in direction:
                             time_direction = "ВВЕРХ 🟢📈"
                             arrow = "⬆️"
                         else:
                             time_direction = "ВНИЗ 🔴📉"
                             arrow = "⬇️"
-
                         type_text = "OTC ИСТОРИЯ" if "OTC" in pair else "MAJOR КЛАСТЕР"
-
                         msg = f"""
 🔥 <b>БРОДЯГА V3.1 FERRARI</b> {arrow}🔥
 
@@ -219,7 +209,7 @@ async def main():
                         last_signals[pair] = time.time()
                         win_history.append(1)
                         found_in_round += 1
-                        print(f"💎 {pair} {time_direction} RSI {curr_rsi:.1f} {similar} подтв")
+                        print(f"💎 {pair} {time_direction} RSI {curr_rsi:.1f}")
                         await asyncio.sleep(10)
                         break
                 
