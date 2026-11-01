@@ -1,10 +1,4 @@
-import os
-import time
-import random
-import pandas as pd
-import numpy as np
-import httpx
-import asyncio
+import os, time, random, pandas as pd, httpx, asyncio
 from datetime import datetime, timezone
 from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -13,41 +7,45 @@ class FakeHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Brodyaga V3.1 FIXED running")
+        self.wfile.write(b"Brodyaga V3.2.1 OTC-EDITION running")
     def log_message(self, *args): return
 
 def run_fake_server():
     port = int(os.environ.get("PORT", 10000))
     HTTPServer(("0.0.0.0", port), FakeHandler).serve_forever()
-
 Thread(target=run_fake_server, daemon=True).start()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 TWELVE_KEY = os.getenv("TWELVEDATA_API_KEY")
 
-MAJORS = [
-    "EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "USD/CHF", "NZD/USD",
-    "EUR/GBP", "EUR/JPY", "GBP/JPY", "AUD/JPY", "EUR/AUD", "GBP/AUD",
-    "EUR/CAD", "AUD/CAD", "USD/SEK", "USD/NOK", "USD/MXN"
+# === V3.2.1 ОТС-EDITION - ВСЕ ПАРЫ С ФОТО = ОТС ===
+PAIRS_FROM_PHOTO_OTC = [
+    "EUR/JPY-OTC", "GBP/NZD-OTC", "EUR/GBP-OTC", "EUR/NZD-OTC", "USD/JPY-OTC", "AUD/CAD-OTC",
+    "NZD/USD-OTC", "GBP/CAD-OTC", "EUR/CAD-OTC", "EUR/CHF-OTC", "EUR/USD-OTC", "USD/SGD-OTC",
+    "USD/CHF-OTC", "NZD/CHF-OTC", "AUD/NZD-OTC", "CAD/CHF-OTC", "USD/CNH-OTC", "AUD/CHF-OTC",
+    "GBP/CHF-OTC", "CHF/JPY-OTC", "AUD/JPY-OTC", "NZD/CAD-OTC", "EUR/AUD-OTC", "USD/MXN-OTC",
+    "EUR/SEK-OTC", "GBP/AUD-OTC", "USD/NOK-OTC"
 ]
-OTC_PAIRS = [
-    "EUR/USD-OTC", "GBP/USD-OTC", "USD/JPY-OTC", "AUD/USD-OTC", "EUR/GBP-OTC", "EUR/JPY-OTC",
-    "USD/CHF-OTC", "USD/INR-OTC", "EUR/INR-OTC", "USD/ARS-OTC", "AUD/NZD-OTC", "USD/CNH-OTC",
-    "USD/NGN-OTC", "USD/PKR-OTC", "USD/PHP-OTC", "USD/COP-OTC", "USD/CLP-OTC", "CAD/CHF-OTC",
-    "AUD/CAD-OTC", "EUR/HUF-OTC", "USD/HUF-OTC", "NZD/JPY-OTC", "AUD/JPY-OTC", "EUR/SGD-OTC",
-    "USD/SGD-OTC", "USD/TRY-OTC", "USD/UAH-OTC", "USD/BRL-OTC", "EUR/BRL-OTC", "GBP/BRL-OTC",
-    "USD/IDR-OTC", "USD/CAD-OTC"
+
+MAJORS = ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD"] # 5 реальных для кластера
+
+OTC_PAIRS = PAIRS_FROM_PHOTO_OTC + [
+    "USD/BDT-OTC", "USD/INR-OTC", "EUR/INR-OTC", "USD/ARS-OTC", "USD/EGP-OTC",
+    "USD/NGN-OTC", "USD/PKR-OTC", "USD/PHP-OTC", "USD/COP-OTC", "USD/CLP-OTC",
+    "USD/PEN-OTC", "EUR/HUF-OTC", "USD/HUA-OTC", "EUR/SGD-OTC", "USD/TRY-OTC",
+    "USD/ZAR-OTC", "USD/BRL-OTC", "EUR/BRL-OTC", "GBP/BRL-OTC", "USD/IDR-OTC", "USD/THB-OTC"
 ]
+OTC_PAIRS = list(dict.fromkeys(OTC_PAIRS)) # убираем дубли
 
 win_history = []
 last_signals = {}
 majors_cache = {}
-SLEEP_BETWEEN_PAIRS = 2
-SLEEP_BETWEEN_ROUNDS = 60
-COOLDOWN_SAME_PAIR = 1200
+SLEEP_BETWEEN_PAIRS = 1.5
+SLEEP_BETWEEN_ROUNDS = 50
+COOLDOWN_SAME_PAIR = 1000
 
-def get_candles(pair="OTC", n=500):
+def get_candles(pair="OTC", n=1500):
     if "/" in pair and "OTC" not in pair and TWELVE_KEY:
         try:
             url = f"https://api.twelvedata.com/time_series?symbol={pair}&interval=1min&outputsize=100&apikey={TWELVE_KEY}"
@@ -59,7 +57,7 @@ def get_candles(pair="OTC", n=500):
     base = random.uniform(1.0, 1.5)
     prices = [base]
     for _ in range(n-1):
-        prices.append(prices[-1] + random.uniform(-0.0005, 0.0005))
+        prices.append(prices[-1] + random.uniform(-0.0006, 0.0006))
     return prices
 
 def calc_rsi(prices, period=14):
@@ -71,22 +69,24 @@ def calc_rsi(prices, period=14):
     rsi_series = 100 - (100 / (1 + rs))
     return rsi_series
 
-def is_otc_manipulation(prices):
-    last_10 = prices[-10:]
-    volatility = (max(last_10) - min(last_10)) / max(last_10) * 100
-    return volatility < 0.02
+def is_otc_manipulation_v32(prices):
+    last_20 = prices[-20:]
+    last_5 = prices[-5:]
+    vol_20 = (max(last_20) - min(last_20)) / max(last_20) * 100
+    vol_5 = (max(last_5) - min(last_5)) / max(last_5) * 100
+    if vol_20 < 0.025: return True, "ПЛОСКИЙ"
+    if vol_5 > vol_20 * 3: return True, "ШИП"
+    same = sum(1 for i in range(-5, -1) if abs(prices[i] - prices[i+1]) < 0.00005)
+    if same >= 3: return True, "БОТ"
+    return False, "ОК"
 
 def check_history_otc(prices, curr_rsi):
     rsi_series = calc_rsi(prices)
     ema = pd.Series(prices).ewm(span=21).mean()
-    similar = 0
-    wins_up = 0
-    wins_down = 0
+    similar = 0; wins_up = 0; wins_down = 0
     for i in range(100, len(prices)-15):
         if pd.isna(rsi_series.iloc[i]): continue
-        rsi_match = abs(rsi_series.iloc[i] - curr_rsi) < 1.8
-        trend_match = (prices[i] > ema.iloc[i]) == (prices[-1] > ema.iloc[-1])
-        if rsi_match and trend_match:
+        if abs(rsi_series.iloc[i] - curr_rsi) < 1.8 and (prices[i] > ema.iloc[i]) == (prices[-1] > ema.iloc[-1]):
             similar += 1
             future = prices[i+7] - prices[i]
             if future > 0: wins_up += 1
@@ -97,24 +97,17 @@ def check_history_otc(prices, curr_rsi):
     return win_rate, direction, similar
 
 def analyze_majors_cluster(current_pair, curr_rsi):
-    if len(majors_cache) < 5:
-        return 50, "НЕТ", 0
-    oversold_count = sum(1 for r in majors_cache.values() if r < 35)
-    overbought_count = sum(1 for r in majors_cache.values() if r > 65)
+    if len(majors_cache) < 3: return 50, "НЕТ", 0
+    oversold = sum(1 for r in majors_cache.values() if r < 35)
+    overbought = sum(1 for r in majors_cache.values() if r > 65)
     total = len(majors_cache)
-    if curr_rsi < 35 and oversold_count / total > 0.6:
-        return 85, "ВВЕРХ 🟢", oversold_count
-    if curr_rsi > 65 and overbought_count / total > 0.6:
-        return 85, "ВНИЗ 🔴", overbought_count
-    if "EUR/USD" in majors_cache and "GBP/USD" in majors_cache:
-        if majors_cache["EUR/USD"] < 40 and majors_cache["GBP/USD"] < 40 and "USD/JPY" in current_pair:
-            return 80, "ВВЕРХ 🟢", 2
+    if curr_rsi < 35 and oversold / total > 0.5: return 85, "ВВЕРХ 🟢", oversold
+    if curr_rsi > 65 and overbought / total > 0.5: return 85, "ВНИЗ 🔴", overbought
     return 50, "НЕТ", 0
 
 def is_news_time():
     now = datetime.now(timezone.utc)
-    if now.hour == 12 and 20 <= now.minute <= 45: return True
-    return False
+    return now.hour == 12 and 20 <= now.minute <= 45
 
 def get_winrate_text():
     if len(win_history) < 3: return ""
@@ -134,95 +127,74 @@ async def send_signal(text):
         print(f"Send error: {e}")
 
 async def main():
-    print("БРОДЯГА V3.1 FIXED ЗАПУЩЕН")
+    print(f"БРОДЯГА V3.2.1 ОТС-EDITION ЗАПУЩЕН: {len(MAJORS)} мажоров + {len(OTC_PAIRS)} ОТС = {len(MAJORS)+len(OTC_PAIRS)} пар")
+    print(f"ОТС с фото: {PAIRS_FROM_PHOTO_OTC}")
     all_pairs = MAJORS + OTC_PAIRS
     random.shuffle(all_pairs)
-    
     while True:
         try:
             if is_news_time():
-                print(f"{datetime.now()} - Пауза новости USD")
                 await asyncio.sleep(120)
                 continue
-
-            found_in_round = 0
+            found = 0
             for pair in all_pairs:
                 if pair in last_signals and time.time() - last_signals[pair] < COOLDOWN_SAME_PAIR:
                     await asyncio.sleep(SLEEP_BETWEEN_PAIRS)
                     continue
-
                 prices = get_candles(pair)
                 rsi_series = calc_rsi(prices)
                 curr_rsi = rsi_series.iloc[-1]
-                if pd.isna(curr_rsi): 
-                    await asyncio.sleep(SLEEP_BETWEEN_PAIRS)
-                    continue
+                if pd.isna(curr_rsi): continue
 
                 if "OTC" not in pair:
                     majors_cache[pair] = curr_rsi
-
-                if is_otc_manipulation(prices) and "OTC" in pair:
-                    await asyncio.sleep(SLEEP_BETWEEN_PAIRS)
-                    continue
+                else:
+                    is_manip, reason = is_otc_manipulation_v32(prices)
+                    if is_manip:
+                        print(f"{pair} - КРУТКА {reason}")
+                        await asyncio.sleep(SLEEP_BETWEEN_PAIRS)
+                        continue
 
                 if curr_rsi <= 32 or curr_rsi >= 68:
                     if "OTC" in pair:
                         win_rate, direction, similar = check_history_otc(prices, curr_rsi)
-                        needed_winrate = 82
-                        needed_similar = 12
+                        need_wr, need_sim = 82, 12
                     else:
                         win_rate, direction, similar = analyze_majors_cluster(pair, curr_rsi)
-                        needed_winrate = 80
-                        needed_similar = 2
+                        need_wr, need_sim = 80, 2
 
-                    if win_rate >= needed_winrate and similar >= needed_similar:
+                    if win_rate >= need_wr and similar >= need_sim:
                         time_now = datetime.now().strftime('%H:%M:%S')
-                        if curr_rsi <= 28 or curr_rsi >= 72 or similar >= 15:
-                            expire_text = "3 МИНУТЫ"
-                            expire_emoji = "⏰⏰⏰"
-                        else:
-                            expire_text = "2 МИНУТЫ"
-                            expire_emoji = "⏰"
-                        if "ВВЕРХ" in direction:
-                            time_direction = "ВВЕРХ 🟢📈"
-                            arrow = "⬆️"
-                        else:
-                            time_direction = "ВНИЗ 🔴📉"
-                            arrow = "⬇️"
-                        type_text = "OTC ИСТОРИЯ" if "OTC" in pair else "MAJOR КЛАСТЕР"
+                        expire_text = "3 МИНУТЫ ⏰⏰⏰" if (curr_rsi <= 28 or curr_rsi >= 72) else "2 МИНУТЫ ⏰"
+                        time_direction = "ВВЕРХ 🟢📈" if "ВВЕРХ" in direction else "ВНИЗ 🔴📉"
+                        arrow = "⬆️" if "ВВЕРХ" in direction else "⬇️"
+                        type_text = "OTC ФОТО" if pair in PAIRS_FROM_PHOTO_OTC else ("OTC ИСТОРИЯ" if "OTC" in pair else "MAJOR КЛАСТЕР")
+
                         msg = f"""
-🔥 <b>БРОДЯГА V3.1 FERRARI</b> {arrow}🔥
+🔥 <b>БРОДЯГА V3.2.1 ОТС</b> {arrow}🔥
 
 💰 Актив: <b>{pair}</b> ({type_text})
 📊 RSI: {curr_rsi:.1f}
 🎯 <b>ВРЕМЯ: {time_direction}</b>
-⏳ Экспирация: {expire_text} {expire_emoji}
+⏳ Экспирация: {expire_text}
 🧠 Подтверждений: {similar}
 ✅ Уверенность: {win_rate:.0f}%
-⏰ Время сигнала: {time_now}
+⏰ Время: {time_now}
 {get_winrate_text()}
 
 👉 <b>ВХОД НА {expire_text} {time_direction}</b>
-#{'OTC' if 'OTC' in pair else 'MAJOR'} #FERRARI
-                        """
+"""
                         await send_signal(msg)
                         last_signals[pair] = time.time()
                         win_history.append(1)
-                        found_in_round += 1
-                        print(f"💎 {pair} {time_direction} RSI {curr_rsi:.1f}")
+                        found += 1
+                        print(f"💎 {pair} {time_direction}")
                         await asyncio.sleep(10)
                         break
-                
                 await asyncio.sleep(SLEEP_BETWEEN_PAIRS)
-            
-            if found_in_round == 0:
-                print(f"Круг пустой ({len(majors_cache)} мажоров в кеше), сплю {SLEEP_BETWEEN_ROUNDS} сек")
-                await asyncio.sleep(SLEEP_BETWEEN_ROUNDS)
-            else:
-                await asyncio.sleep(40)
-            
+            await asyncio.sleep(40 if found else SLEEP_BETWEEN_ROUNDS)
         except Exception as e:
-            print(f"Ошибка цикла: {e}")
+            print(f"Ошибка: {e}")
             await asyncio.sleep(60)
 
 if __name__ == "__main__":
