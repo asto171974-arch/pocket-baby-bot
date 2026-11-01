@@ -7,7 +7,7 @@ class FakeHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Brodyaga V3.2.1 1500-CANDLES running")
+        self.wfile.write(b"Brodyaga V3.2.2 20MIN EDITION running")
     def log_message(self, *args): return
 
 def run_fake_server():
@@ -28,40 +28,34 @@ PAIRS_FROM_PHOTO_OTC = [
 ]
 
 MAJORS = ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD"]
-
 OTC_PAIRS = PAIRS_FROM_PHOTO_OTC + [
-    "USD/BDT-OTC", "USD/INR-OTC", "EUR/INR-OTC", "USD/ARS-OTC", "USD/EGP-OTC",
-    "USD/NGN-OTC", "USD/PKR-OTC", "USD/PHP-OTC", "USD/COP-OTC", "USD/CLP-OTC",
-    "USD/PEN-OTC", "EUR/HUF-OTC", "USD/UAH-OTC", "EUR/SGD-OTC", "USD/TRY-OTC",
-    "USD/ZAR-OTC", "USD/BRL-OTC", "EUR/BRL-OTC", "GBP/BRL-OTC", "USD/IDR-OTC", "USD/THB-OTC"
+    "USD/BDT-OTC", "USD/INR-OTC", "EUR/INR-OTC", "USD/ARS-OTC", "USD/HUA-OTC"
 ]
 OTC_PAIRS = list(dict.fromkeys(OTC_PAIRS))
 
 win_history = []
 last_signals = {}
 majors_cache = {}
-SLEEP_BETWEEN_PAIRS = 0.8 # быстрее для 1500 свечей
+SLEEP_BETWEEN_PAIRS = 0.8
 SLEEP_BETWEEN_ROUNDS = 35
 COOLDOWN_SAME_PAIR = 800
 
-def get_candles(pair="OTC", n=1500): # <-- 1500 СВЕЧЕЙ
+def get_candles(pair="OTC", n=1500):
     if "/" in pair and "OTC" not in pair and TWELVE_KEY:
         try:
             url = f"https://api.twelvedata.com/time_series?symbol={pair}&interval=1min&outputsize=500&apikey={TWELVE_KEY}"
             r = httpx.get(url, timeout=10).json()
             if 'values' in r and len(r['values']) > 10:
                 data = [float(x['close']) for x in reversed(r['values'])]
-                # Добиваем до 1500 рандомом если апи дал 500
                 while len(data) < 1500:
                     data.insert(0, data[0] + random.uniform(-0.0005, 0.0005))
                 return data[-1500:]
         except Exception as e:
             print(f"Twelve error {pair}: {e}")
-    # Для ОТС - 1500 свечей с НОРМАЛЬНОЙ волатильностью
     base = random.uniform(1.0, 1.8)
     prices = [base]
     for _ in range(n-1):
-        prices.append(prices[-1] + random.uniform(-0.0025, 0.0025)) # было 0.0006, стало 0.0025
+        prices.append(prices[-1] + random.uniform(-0.0025, 0.0025))
     return prices
 
 def calc_rsi(prices, period=14):
@@ -78,8 +72,8 @@ def is_otc_manipulation_v32_1500(prices):
     last_5 = prices[-5:]
     vol_20 = (max(last_20) - min(last_20)) / max(last_20) * 100
     vol_5 = (max(last_5) - min(last_5)) / max(last_5) * 100
-    if vol_20 < 0.012: return True, "ПЛОСКИЙ" # было 0.025, стало 0.012 для 1500
-    if vol_5 > vol_20 * 4.5: return True, "ШИП" # было 3, стало 4.5
+    if vol_20 < 0.012: return True, "ПЛОСКИЙ"
+    if vol_5 > vol_20 * 4.5: return True, "ШИП"
     same = sum(1 for i in range(-6, -1) if abs(prices[i] - prices[i+1]) < 0.00008)
     if same >= 4: return True, "БОТ"
     return False, "ОК"
@@ -88,10 +82,8 @@ def check_history_otc_1500(prices, curr_rsi):
     rsi_series = calc_rsi(prices)
     ema = pd.Series(prices).ewm(span=21).mean()
     similar = 0; wins_up = 0; wins_down = 0
-    # Ищем по всем 1500, но с шагом для скорости
-    for i in range(200, len(prices)-15, 2): # шаг 2 для скорости
+    for i in range(200, len(prices)-15, 2):
         if pd.isna(rsi_series.iloc[i]): continue
-        # Допуск 3.0 для 1500 свечей
         if abs(rsi_series.iloc[i] - curr_rsi) < 3.0 and (prices[i] > ema.iloc[i]) == (prices[-1] > ema.iloc[-1]):
             similar += 1
             future = prices[i+7] - prices[i]
@@ -132,8 +124,30 @@ async def send_signal(text):
     except Exception as e:
         print(f"Send error: {e}")
 
+# === НОВОЕ: ПИНГ КАЖДЫЕ 20 МИН С 06 ДО 24 ===
+async def scheduled_keepalive():
+    print("🕐 Планировщик 20MIN 06-24 запущен")
+    while True:
+        try:
+            now = datetime.now()
+            if 6 <= now.hour < 24 and now.minute % 20 == 0:
+                print(f"⏰ Плановый пинг {now.strftime('%H:%M')}")
+                try:
+                    if os.getenv('RENDER_EXTERNAL_HOSTNAME'):
+                        async with httpx.AsyncClient() as client:
+                            await client.get(f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}", timeout=5)
+                    active = len(OTC_PAIRS) + len(MAJORS)
+                    await send_signal(f"✅ <b>БРОДЯГА ЖИВ</b> ⏰ {now.strftime('%H:%M')}\n📊 Пар: {active} | Кэш: {len(majors_cache)}\n💤 След. пинг через 20 мин")
+                except Exception as e:
+                    print(f"keepalive error: {e}")
+                await asyncio.sleep(65)
+        except Exception as e:
+            print(f"scheduler error: {e}")
+        await asyncio.sleep(30)
+
 async def main():
-    print(f"БРОДЯГА V3.2.1 1500-CANDLES ЗАПУЩЕН: {len(MAJORS)} мажоров + {len(OTC_PAIRS)} ОТС = {len(MAJORS)+len(OTC_PAIRS)} пар по 1500 свечей!")
+    print(f"БРОДЯГА V3.2.2 20MIN EDITION ЗАПУЩЕН: {len(MAJORS)} мажоров + {len(OTC_PAIRS)} ОТС = {len(MAJORS)+len(OTC_PAIRS)} пар по 1500 свечей!")
+    asyncio.create_task(scheduled_keepalive())
     all_pairs = MAJORS + OTC_PAIRS
     random.shuffle(all_pairs)
     while True:
@@ -156,14 +170,13 @@ async def main():
                 else:
                     is_manip, reason = is_otc_manipulation_v32_1500(prices)
                     if is_manip:
-                        # print(f"{pair} - КРУТКА {reason}") # закомментил чтобы не спамило
                         await asyncio.sleep(SLEEP_BETWEEN_PAIRS)
                         continue
 
-                if curr_rsi <= 35 or curr_rsi >= 65: # расширил зону входа для 1500
+                if curr_rsi <= 35 or curr_rsi >= 65:
                     if "OTC" in pair:
                         win_rate, direction, similar = check_history_otc_1500(prices, curr_rsi)
-                        need_wr, need_sim = 75, 6 # было 82/12, стало 75/6 для 1500
+                        need_wr, need_sim = 75, 6
                     else:
                         win_rate, direction, similar = analyze_majors_cluster(pair, curr_rsi)
                         need_wr, need_sim = 75, 2
@@ -182,7 +195,7 @@ async def main():
 📊 RSI: {curr_rsi:.1f}
 🎯 <b>ВРЕМЯ: {time_direction}</b>
 ⏳ Экспирация: {expire_text}
-🧠 Подтверждений: {similar} / 1500 свечей
+🧠 Подтверждений: {similar} / 1500
 ✅ Уверенность: {win_rate:.0f}%
 ⏰ Время: {time_now}
 {get_winrate_text()}
