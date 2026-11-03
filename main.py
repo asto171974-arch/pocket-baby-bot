@@ -27,14 +27,14 @@ import json
 import websockets
 import pandas as pd
 
-<span style="color:red">BINARIUM_WS_URL = "wss://ТВОЙ_URL_ОТ_BINARIUM/API/candles"</span>
+<span style="color:red">BINARIUM_WS_URL = "wss://ТВОЙ_URL_ОТ_BINARIUM/API/candles"
 
-<span style="color:red">BINARIUM_TOKEN = "ТВОЙ_ТОКЕН_ОТ_BINARIUM"</span>
+<span style="color:red">BINARIUM_TOKEN = "ТВОЙ_ТОКЕН_ОТ_BINARIUM"
 
 async def get_real_candles_B(symbol="EUR/USD OTC", tf="1m", count=100):
-    <span style="color:red">headers = {"Authorization": f"Bearer {BINARIUM_TOKEN}"}</span>
+    <span style="color:red">headers = {"Authorization": f"Bearer {BINARIUM_TOKEN}"}
     payload = {
-        <span style="color:red">"API_action": "get_candles",</span>
+        <span style="color:red">"API_action": "get_candles"
         "symbol": symbol,
         "timeframe": tf,
         "count": count
@@ -80,3 +80,13 @@ SYMBOLS = ["EUR/USD OTC","GBP/USD OTC","USD/JPY OTC","EUR/JPY OTC","AUD/USD OTC"
 def format_signal(sym, direction, rsi_val, tf="1m"):
     t = datetime.now().strftime("%H:%M:%S")
     return f"🔥 V5 SIGNAL {sym}\nНаправление: {direction}\nТФ: {tf}\nRSI: {rsi_val}\nВремя: {t} (UTC+3)"
+
+import os
+from flask import Flask
+app = Flask(_name_)
+@app.route('/')
+def home():return "Bot is running"
+
+if_name_=="_main_":
+     port = int(os.environ.get("PORT",10000))
+     app.run(host='0.0.0.0,port=port)
