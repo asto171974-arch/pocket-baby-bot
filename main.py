@@ -1,46 +1,30 @@
-import os, time, random, pandas as pd, httpx, asyncio
+import os
+import json
+import asyncio
+import pandas as pd
+import websockets
 from datetime import datetime
-from threading import Thread
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from flask import Flask
 
-class FakeHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"V5 REAL OTC running")
-    def log_message(self, *args): return
-
-def run_fake_server():
-    port = int(os.environ.get("PORT", 10000))
-    HTTPServer(("0.0.0.0", port), FakeHandler).serve_forever()
-Thread(target=run_fake_server, daemon=True).start()
-
+# --- ENV ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 TWELVE_KEY = os.getenv("TWELVEDATA_API_KEY")
 BIN_TOKEN = os.getenv("BINARIUM_TOKEN")
-BIN_EMAIL = os.getenv("BINARIUM_EMAIL")
-BIN_PASS = os.getenv("BINARIUM_PASS")
-
-import asyncio
-import json
-import websockets
-import pandas as pd
 
 BINARIUM_WS_URL = "wss://ТВОЙ_URL_ОТ_BINARIUM/API/candles"
-
 BINARIUM_TOKEN = "ТВОЙ_ТОКЕН_ОТ_BINARIUM"
 
 async def get_real_candles_B(symbol="EUR/USD OTC", tf="1m", count=100):
     headers = {"Authorization": f"Bearer {BINARIUM_TOKEN}"}
     payload = {
-        "API_action": "get_candles"
+        "API_action": "get_candles",
         "symbol": symbol,
         "timeframe": tf,
         "count": count
     }
     try:
-        async with websockets.connect(BINARIUM_WS_URL, extra_headers=headers) as ws:</span>
+        async with websockets.connect(BINARIUM_WS_URL, extra_headers=headers) as ws:
             await ws.send(json.dumps(payload))
             raw = await ws.recv()
             data = json.loads(raw)
@@ -62,7 +46,6 @@ def analyze(df):
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
-    # V5 фильтр: тренд + импульс + свеча
     up_trend = last['ema9'] > last['ema21'] and last['close'] > last['ema9']
     down_trend = last['ema9'] < last['ema21'] and last['close'] < last['ema9']
     
@@ -79,14 +62,14 @@ SYMBOLS = ["EUR/USD OTC","GBP/USD OTC","USD/JPY OTC","EUR/JPY OTC","AUD/USD OTC"
 
 def format_signal(sym, direction, rsi_val, tf="1m"):
     t = datetime.now().strftime("%H:%M:%S")
-    return f"🔥 V5 SIGNAL {sym}\nНаправление: {direction}\nТФ: {tf}\nRSI: {rsi_val}\nВремя: {t} (UTC+3)"
+    return f"V5 SIGNAL {sym}\nНаправление: {direction}\nТФ: {tf}\nRSI: {rsi_val}\nВремя: {t} (UTC+3)"
 
-import os
-from flask import Flask
-app = Flask(_name_)
+app = Flask(__name__)
+
 @app.route('/')
-def home():return "Bot is running"
+def home():
+    return "Bot is running - V5 REAL OTC"
 
-if_name_=="_main_":
-     port = int(os.environ.get("PORT",10000))
-     app.run(host='0.0.0.0', port=port)
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
