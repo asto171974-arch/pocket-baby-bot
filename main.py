@@ -6,7 +6,6 @@ from datetime import datetime
 from telegram import Bot
 from twelvedata import TDClient
 
-# --- ENV ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 TD_KEY = os.getenv("TWELVEDATA_API_KEY")
@@ -27,17 +26,14 @@ def get_current_pairs():
         return OTC_PAIRS, "OTC"
 
 def parse_to_df(data):
-    # TwelveData возвращает list dicts
     df = pd.DataFrame(data)
-    df = df.rename(columns={"open": "open", "high": "high", "low": "low", "close": "close"})
     df[["open","high","low","close"]] = df[["open","high","low","close"]].astype(float)
     return df.iloc[::-1].reset_index(drop=True)
 
 async def get_candles(symbol: str):
     base = symbol.replace(" OTC", "")
-    td_symbol = base.replace("/", "/") # формат EUR/USD
     try:
-        ts = td_client.time_series(symbol=td_symbol, interval="1min", outputsize=100, timezone="UTC").as_json()
+        ts = td_client.time_series(symbol=base, interval="1min", outputsize=100, timezone="UTC").as_json()
         if not ts or "values" not in ts:
             return None
         return parse_to_df(ts["values"])
@@ -51,27 +47,20 @@ def analyze(df):
     df['ema9'] = df['close'].ewm(span=9).mean()
     df['ema21'] = df['close'].ewm(span=21).mean()
     df['ema50'] = df['close'].ewm(span=50).mean()
-    
     delta = df['close'].diff()
     gain = delta.clip(lower=0).rolling(14).mean()
     loss = -delta.clip(upper=0).rolling(14).mean()
     df['rsi'] = 100 - (100 / (1 + gain / (loss + 1e-9)))
-
     last = df.iloc[-1]
     prev = df.iloc[-2]
-
-    # Фильтр флета и середины
     if 45 < last['rsi'] < 55:
         return None
     if abs(last['ema9'] - last['ema21']) / last['close'] < 0.00015:
         return None
-
     up = last['ema9'] > last['ema21'] > last['ema50'] and last['close'] > last['ema9']
     down = last['ema9'] < last['ema21'] < last['ema50'] and last['close'] < last['ema9']
-
     bull_eng = last['close'] > last['open'] and last['close'] > prev['open'] and last['open'] < prev['close']
     bear_eng = last['close'] < last['open'] and last['close'] < prev['open'] and last['open'] > prev['close']
-
     if up and last['rsi'] < 68 and bull_eng:
         return "CALL", round(last['rsi'],1)
     if down and last['rsi'] > 32 and bear_eng:
@@ -81,26 +70,20 @@ def analyze(df):
 async def send_signal(symbol, direction, rsi, mode):
     hour = datetime.now(MSK).strftime("%H:%M")
     icon = "🟢" if direction == "CALL" else "🔴"
-    text = (
-        f"{icon} V5 {mode} {hour} MSK\n"
-        f"Пара: {symbol}\n"
-        f"Сигнал: {direction} ⬆️" if direction == "CALL" else f"Сигнал: {direction} ⬇️\n"
-        f"RSI: {rsi}\n"
-        f"ТФ: 1m | Экспирация: 2-3 мин"
-    )
-    await bot.send_message(chat_id=CHANNEL_ID, text=text)
+    txt = f"{icon} V5 {mode} {hour} MSK\nПара: {symbol}\nСигнал: {direction}\nRSI: {rsi}\nТФ: 1m"
+    await bot.send_message(chat_id=CHANNEL_ID, text=txt)
 
 async def job():
     while True:
         try:
             pairs, mode = get_current_pairs()
-            print(f"[{datetime.now(MSK).strftime('%H:%M')}] MODE {mode}")
+            print(f"[{datetime.now(MSK).strftime('%H:%M')}] {mode} {pairs}")
             for symbol in pairs:
                 df = await get_candles(symbol)
                 res = analyze(df)
                 if res:
-                    direction, rsi = res
-                    await send_signal(symbol, direction, rsi, mode)
+                    d, r = res
+                    await send_signal(symbol, d, r, mode)
                     await asyncio.sleep(1.5)
                 await asyncio.sleep(0.5)
         except Exception as e:
