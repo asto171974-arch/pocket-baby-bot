@@ -10,22 +10,23 @@ class FakeHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"V5 REAL OTC running")
-    def log_message(self, *args): return
+        self.wfile.write(b"V5 running")
+    def log_message(self, *a): return
 
 def run_fake_server():
-    port = int(os.environ.get("PORT", 10000))
-    HTTPServer(("0.0.0.0", port), FakeHandler).serve_forever()
-
+    p = int(os.environ.get("PORT", 10000))
+    HTTPServer(("0.0.0.0", p), FakeHandler).serve_forever()
 Thread(target=run_fake_server, daemon=True).start()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
-B_URL = os.getenv("BINARIUM_WS_URL")
-B_TOKEN = os.getenv("BINARIUM_TOKEN")
 
-async def get_real_candles_B(symbol="EUR/USD OTC", tf="1m", count=100):
-    headers = {"Authorization": f"Bearer {B_TOKEN}"}
+# ТВОИ ПЕРЕМЕННЫЕ - ЗАПОЛНИШЬ ПОТОМ
+B_URL = os.getenv("B_URL")
+B_TOK = os.getenv("B_TOK")
+
+async def get_candles(symbol="EUR/USD OTC", tf="1m", count=100):
+    headers = {"Authorization": f"Bearer {B_TOK}"}
     payload = {"action": "get_candles", "symbol": symbol, "timeframe": tf, "count": count}
     try:
         async with websockets.connect(B_URL, extra_headers=headers) as ws:
@@ -54,13 +55,15 @@ def analyze(df):
     down = last['ema9'] < last['ema21'] and last['close'] < last['ema9']
     bull = last['close'] > last['open'] and last['close'] > prev['open'] and last['open'] < prev['close']
     bear = last['close'] < last['open'] and last['close'] < prev['open'] and last['open'] > prev['close']
-    if up and last['rsi'] < 70 and bull: return "CALL", round(last['rsi'],1)
-    if down and last['rsi'] > 30 and bear: return "PUT", round(last['rsi'],1)
+    if up and last['rsi'] < 70 and bull:
+        return "CALL", round(last['rsi'],1)
+    if down and last['rsi'] > 30 and bear:
+        return "PUT", round(last['rsi'],1)
     return None
 
 SYMBOLS = ["EUR/USD OTC","GBP/USD OTC","USD/JPY OTC","EUR/JPY OTC","AUD/USD OTC"]
 
-def format_signal(sym, direction, rsi_val, tf="1m"):
+def fmt(sym, direction, rsi_val, tf="1m"):
     t = datetime.now().strftime("%H:%M:%S")
     return f"V5 SIGNAL {sym}\nDir: {direction}\nTF: {tf}\nRSI: {rsi_val}\nTime: {t}"
 
@@ -68,13 +71,14 @@ async def main_loop():
     async with httpx.AsyncClient() as client:
         while True:
             for sym in SYMBOLS:
-                df = await get_real_candles_B(sym)
+                df = await get_candles(sym)
                 res = analyze(df)
                 if res:
                     d, r = res
-                    txt = format_signal(sym, d, r)
+                    text = fmt(sym, d, r)
                     try:
-                        await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": CHANNEL_ID, "text": txt})
+                        await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                                          json={"chat_id": CHANNEL_ID, "text": text})
                     except Exception as e:
                         print(e)
                 await asyncio.sleep(1)
