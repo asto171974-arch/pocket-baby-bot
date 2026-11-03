@@ -27,7 +27,7 @@ import json
 import websockets
 import pandas as pd
 
-<span style="color:red">BINARIUM_WS_URL = "wss://ТВОЙ_URL_ОТ_BINARIUM/API/candles"
+BINARIUM_WS_URL = "wss://ТВОЙ_URL_ОТ_BINARIUM/API/candles"
 
 <span style="color:red">BINARIUM_TOKEN = "ТВОЙ_ТОКЕН_ОТ_BINARIUM"
 
