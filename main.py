@@ -1,88 +1,112 @@
-import os, asyncio, json
+import os
+import asyncio
+import pytz
 import pandas as pd
-import httpx
-import websockets
 from datetime import datetime
-from threading import Thread
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from telegram import Bot
+from twelvedata import TDClient
 
-class FakeHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"V5 running")
-    def log_message(self, *a): return
-
-def run_fake_server():
-    p = int(os.environ.get("PORT", 10000))
-    HTTPServer(("0.0.0.0", p), FakeHandler).serve_forever()
-Thread(target=run_fake_server, daemon=True).start()
-
+# --- ENV ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
+TD_KEY = os.getenv("TWELVEDATA_API_KEY")
 
-# ТВОИ ПЕРЕМЕННЫЕ - ЗАПОЛНИШЬ ПОТОМ
-B_URL = os.getenv("B_URL")
-B_TOK = os.getenv("B_TOK")
+bot = Bot(token=BOT_TOKEN)
+td_client = TDClient(apikey=TD_KEY)
 
-async def get_candles(symbol="EUR/USD OTC", tf="1m", count=100):
-    headers = {"Authorization": f"Bearer {B_TOK}"}
-    payload = {"action": "get_candles", "symbol": symbol, "timeframe": tf, "count": count}
+MSK = pytz.timezone('Europe/Moscow')
+
+REAL_PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "EUR/JPY", "GBP/JPY", "AUD/USD", "USD/CHF"]
+OTC_PAIRS = ["EUR/USD OTC", "GBP/USD OTC", "EUR/JPY OTC", "AUD/USD OTC", "GBP/JPY OTC", "EUR/GBP OTC"]
+
+def get_current_pairs():
+    hour = datetime.now(MSK).hour
+    if 9 <= hour < 18:
+        return REAL_PAIRS, "REAL"
+    else:
+        return OTC_PAIRS, "OTC"
+
+def parse_to_df(data):
+    # TwelveData возвращает list dicts
+    df = pd.DataFrame(data)
+    df = df.rename(columns={"open": "open", "high": "high", "low": "low", "close": "close"})
+    df[["open","high","low","close"]] = df[["open","high","low","close"]].astype(float)
+    return df.iloc[::-1].reset_index(drop=True)
+
+async def get_candles(symbol: str):
+    base = symbol.replace(" OTC", "")
+    td_symbol = base.replace("/", "/") # формат EUR/USD
     try:
-        async with websockets.connect(B_URL, extra_headers=headers) as ws:
-            await ws.send(json.dumps(payload))
-            raw = await ws.recv()
-            data = json.loads(raw)
-            candles = data.get('candles') or data.get('data') or []
-            df = pd.DataFrame(candles)
-            if df.empty: return None
-            if len(df.columns) >= 5:
-                df.columns = ['time','open','high','low','close'][:len(df.columns)]
-            return df
+        ts = td_client.time_series(symbol=td_symbol, interval="1min", outputsize=100, timezone="UTC").as_json()
+        if not ts or "values" not in ts:
+            return None
+        return parse_to_df(ts["values"])
     except Exception as e:
-        print(f"fetch err: {e}")
+        print(f"ERR {symbol}: {e}")
         return None
 
 def analyze(df):
-    if df is None or len(df) < 50: return None
-    df = df.copy()
+    if df is None or len(df) < 60:
+        return None
     df['ema9'] = df['close'].ewm(span=9).mean()
     df['ema21'] = df['close'].ewm(span=21).mean()
-    df['rsi'] = 100 - (100 / (1 + df['close'].diff().clip(lower=0).rolling(14).mean() / (-df['close'].diff().clip(upper=0).rolling(14).mean().abs() + 1e-9)))
+    df['ema50'] = df['close'].ewm(span=50).mean()
+    
+    delta = df['close'].diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = -delta.clip(upper=0).rolling(14).mean()
+    df['rsi'] = 100 - (100 / (1 + gain / (loss + 1e-9)))
+
     last = df.iloc[-1]
     prev = df.iloc[-2]
-    up = last['ema9'] > last['ema21'] and last['close'] > last['ema9']
-    down = last['ema9'] < last['ema21'] and last['close'] < last['ema9']
-    bull = last['close'] > last['open'] and last['close'] > prev['open'] and last['open'] < prev['close']
-    bear = last['close'] < last['open'] and last['close'] < prev['open'] and last['open'] > prev['close']
-    if up and last['rsi'] < 70 and bull:
+
+    # Фильтр флета и середины
+    if 45 < last['rsi'] < 55:
+        return None
+    if abs(last['ema9'] - last['ema21']) / last['close'] < 0.00015:
+        return None
+
+    up = last['ema9'] > last['ema21'] > last['ema50'] and last['close'] > last['ema9']
+    down = last['ema9'] < last['ema21'] < last['ema50'] and last['close'] < last['ema9']
+
+    bull_eng = last['close'] > last['open'] and last['close'] > prev['open'] and last['open'] < prev['close']
+    bear_eng = last['close'] < last['open'] and last['close'] < prev['open'] and last['open'] > prev['close']
+
+    if up and last['rsi'] < 68 and bull_eng:
         return "CALL", round(last['rsi'],1)
-    if down and last['rsi'] > 30 and bear:
+    if down and last['rsi'] > 32 and bear_eng:
         return "PUT", round(last['rsi'],1)
     return None
 
-SYMBOLS = ["EUR/USD OTC","GBP/USD OTC","USD/JPY OTC","EUR/JPY OTC","AUD/USD OTC"]
+async def send_signal(symbol, direction, rsi, mode):
+    hour = datetime.now(MSK).strftime("%H:%M")
+    icon = "🟢" if direction == "CALL" else "🔴"
+    text = (
+        f"{icon} V5 {mode} {hour} MSK\n"
+        f"Пара: {symbol}\n"
+        f"Сигнал: {direction} ⬆️" if direction == "CALL" else f"Сигнал: {direction} ⬇️\n"
+        f"RSI: {rsi}\n"
+        f"ТФ: 1m | Экспирация: 2-3 мин"
+    )
+    await bot.send_message(chat_id=CHANNEL_ID, text=text)
 
-def fmt(sym, direction, rsi_val, tf="1m"):
-    t = datetime.now().strftime("%H:%M:%S")
-    return f"V5 SIGNAL {sym}\nDir: {direction}\nTF: {tf}\nRSI: {rsi_val}\nTime: {t}"
-
-async def main_loop():
-    async with httpx.AsyncClient() as client:
-        while True:
-            for sym in SYMBOLS:
-                df = await get_candles(sym)
+async def job():
+    while True:
+        try:
+            pairs, mode = get_current_pairs()
+            print(f"[{datetime.now(MSK).strftime('%H:%M')}] MODE {mode}")
+            for symbol in pairs:
+                df = await get_candles(symbol)
                 res = analyze(df)
                 if res:
-                    d, r = res
-                    text = fmt(sym, d, r)
-                    try:
-                        await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                                          json={"chat_id": CHANNEL_ID, "text": text})
-                    except Exception as e:
-                        print(e)
-                await asyncio.sleep(1)
-            await asyncio.sleep(10)
+                    direction, rsi = res
+                    await send_signal(symbol, direction, rsi, mode)
+                    await asyncio.sleep(1.5)
+                await asyncio.sleep(0.5)
+        except Exception as e:
+            print(f"job error: {e}")
+        await asyncio.sleep(60)
 
 if __name__ == "__main__":
-    asyncio.run(main_loop())
+    print("Bot V5 started")
+    asyncio.run(job())
