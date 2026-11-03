@@ -34,7 +34,7 @@ BINARIUM_TOKEN = "ТВОЙ_ТОКЕН_ОТ_BINARIUM"
 async def get_real_candles_B(symbol="EUR/USD OTC", tf="1m", count=100):
     headers = {"Authorization": f"Bearer {BINARIUM_TOKEN}"}
     payload = {
-        API_action": "get_candles"
+        "API_action": "get_candles"
         "symbol": symbol,
         "timeframe": tf,
         "count": count
