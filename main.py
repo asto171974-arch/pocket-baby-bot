@@ -29,18 +29,18 @@ import pandas as pd
 
 BINARIUM_WS_URL = "wss://ТВОЙ_URL_ОТ_BINARIUM/API/candles"
 
-<span style="color:red">BINARIUM_TOKEN = "ТВОЙ_ТОКЕН_ОТ_BINARIUM"
+BINARIUM_TOKEN = "ТВОЙ_ТОКЕН_ОТ_BINARIUM"
 
 async def get_real_candles_B(symbol="EUR/USD OTC", tf="1m", count=100):
-    <span style="color:red">headers = {"Authorization": f"Bearer {BINARIUM_TOKEN}"}
+    headers = {"Authorization": f"Bearer {BINARIUM_TOKEN}"}
     payload = {
-        <span style="color:red">"API_action": "get_candles"
+        API_action": "get_candles"
         "symbol": symbol,
         "timeframe": tf,
         "count": count
     }
     try:
-        <span style="color:red">async with websockets.connect(BINARIUM_WS_URL, extra_headers=headers) as ws:</span>
+        async with websockets.connect(BINARIUM_WS_URL, extra_headers=headers) as ws:</span>
             await ws.send(json.dumps(payload))
             raw = await ws.recv()
             data = json.loads(raw)
