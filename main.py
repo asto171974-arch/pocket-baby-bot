@@ -13,7 +13,7 @@ class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Brodyaga V3.2.6 SCHEDULE is running smoothly!")
+        self.wfile.write(b"Brodyaga V3.2.7 STABLE running")
     def log_message(self, *args):
         pass
 
@@ -35,11 +35,13 @@ BEST_OTC_12 = [
 ]
 NORMAL_PAIRS = ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "EUR/JPY", "USD/CHF"]
 
+# Словарь для отслеживания времени последнего сигнала по каждой паре
 last_signals = {}
+# Общий таймер последней отправки сигнала в канал (защита от спама)
+last_global_signal_time = 0
 
 # ==================== СБОР СВЕЧЕЙ ====================
 def get_candles(pair="OTC", n=800):
-    # Если это форекс-пара и указан ключ Twelve Data — берем реальные данные
     if "/" in pair and "OTC" not in pair and TWELVE_KEY:
         try:
             url = f"https://api.twelvedata.com/time_series?symbol={pair}&interval=1min&outputsize=200&apikey={TWELVE_KEY}"
@@ -50,7 +52,6 @@ def get_candles(pair="OTC", n=800):
         except Exception as e:
             print(f"Twelve Data API warning for {pair}: {e}")
     
-    # Надежный генератор (для OTC или если ключ не задан)
     base = random.uniform(1.05, 1.35)
     prices = [base]
     trend = random.choice([-1, 1]) * 0.0002
@@ -68,11 +69,11 @@ def calc_rsi(prices, period=14):
     return 100 - (100 / (1 + rs))
 
 def is_market_ok(prices, curr_rsi):
-    if 42 < curr_rsi < 58: 
+    if 43 < curr_rsi < 57: 
         return False
     last_20 = prices[-20:]
     vol = (max(last_20) - min(last_20)) / max(last_20) * 100
-    if vol < 0.02: 
+    if vol < 0.025: 
         return False
     return True
 
@@ -86,7 +87,7 @@ def check_history(prices, curr_rsi):
     for i in range(100, len(prices) - 15):
         if pd.isna(rsi_series.iloc[i]): 
             continue
-        if abs(rsi_series.iloc[i] - curr_rsi) < 2.0 and (prices[i] > ema21.iloc[i]) == (prices[-1] > ema21.iloc[-1]):
+        if abs(rsi_series.iloc[i] - curr_rsi) < 1.8 and (prices[i] > ema21.iloc[i]) == (prices[-1] > ema21.iloc[-1]):
             similar += 1
             future = prices[i + 5] - prices[i]
             if future > 0: 
@@ -94,7 +95,7 @@ def check_history(prices, curr_rsi):
             else: 
                 wins_down += 1
                 
-    if similar < 8: 
+    if similar < 10: 
         return 50, "НЕТ", 0
         
     win_rate = max(wins_up, wins_down) / similar * 100
@@ -103,20 +104,19 @@ def check_history(prices, curr_rsi):
 
 def get_active_pairs():
     now = datetime.now()
-    weekday = now.weekday()  # 0 = Понедельник, 6 = Воскресенье
+    weekday = now.weekday()  # 0=Пн ... 6=Вс
     hour = now.hour
     
-    # Суббота и Воскресенье — только OTC
+    # Выходные (Сб, Вс) — строго OTC
     if weekday >= 5:
-        return BEST_OTC_12, f"СБ-ВС ОТС ({hour}:00)"
+        return BEST_OTC_12, f"ВЫХОДНЫЕ ОТС ({hour}:00)"
     
-    # Понедельник — Пятница
+    # Будни (Пн-Пт): Днем (8:00 - 18:00) — Нормальные мажоры (Форекс открыт)
     if 8 <= hour < 18:
-        return BEST_OTC_12, f"ПН-ПТ День ОТС ({hour}:00)"
-    elif 18 <= hour <= 23:
-        return NORMAL_PAIRS, f"ПН-ПТ Вечер Нормал ({hour}:00)"
+        return NORMAL_PAIRS, f"БУДНИ ДЕНЬ (Мажоры) ({hour}:00)"
+    # Вечер и ночь (18:00 - 8:00) — Переходим на OTC
     else:
-        return [], f"Ночной сон ({hour}:00)"
+        return BEST_OTC_12, f"БУДНИ НОЧЬ/ВЕЧЕР (ОТС) ({hour}:00)"
 
 # ==================== TELEGRAM ОТПРАВКА ====================
 async def send_signal(text):
@@ -137,60 +137,64 @@ async def keepalive():
     while True:
         try:
             now = datetime.now()
-            if now.minute % 20 == 0 and 8 <= now.hour <= 23:
+            # Отправка статус-сообщения реже (раз в час) чтобы не засорять чат
+            if now.minute == 0 and 8 <= now.hour <= 23:
                 active, mode = get_active_pairs()
                 if active:
                     await send_signal(
-                        f"✅ <b>БРОДЯГА SCHEDULE ЖИВ</b> ⏰ {now.strftime('%H:%M')}\n"
+                        f"🟢 <b>БРОДЯГА РАБОТАЕТ</b> ⏰ {now.strftime('%H:%M')}\n"
                         f"📊 Режим: {mode}\n"
-                        f"💰 Активных пар: {len(active)}\n"
                         f"📅 День: {['ПН','ВТ','СР','ЧТ','ПТ','СБ','ВС'][now.weekday()]}"
                     )
-                await asyncio.sleep(65)
+                await asyncio.sleep(70)
         except Exception as e:
             print(f"Keepalive error: {e}")
         await asyncio.sleep(30)
 
 # ==================== ОСНОВНОЙ ЦИКЛ БОТА ====================
 async def main():
-    print("🚀 БРОДЯГА V3.2.6 SCHEDULE ЗАПУЩЕН")
+    global last_global_signal_time
+    print("🚀 БРОДЯГА V3.2.7 (STRICT 1-MIN INTERVAL) ЗАПУЩЕН")
     asyncio.create_task(keepalive())
     
     while True:
         try:
-            active_pairs, mode_text = get_active_pairs()
-            if not active_pairs:
-                print(f"💤 Спим по расписанию: {mode_text}")
-                await asyncio.sleep(60)
+            # Строгая защита: если с момента последнего сигнала прошло меньше 55 секунд — даже не сканируем
+            if time.time() - last_global_signal_time < 55:
+                await asyncio.sleep(5)
                 continue
 
-            print(f"🔍 Режим: {mode_text} | Пар на проверке: {len(active_pairs)}")
-            found = 0
+            active_pairs, mode_text = get_active_pairs()
+            if not active_pairs:
+                await asyncio.sleep(30)
+                continue
+
             random.shuffle(active_pairs)
-            
+            signal_sent = False
+
             for pair in active_pairs:
-                # Защита от частых дубликатов по одному инструменту (20 минут)
-                if pair in last_signals and time.time() - last_signals[pair] < 1200:
+                # Проверка кулдауна на конкретную пару (минимум 30 минут отдыха для инструмента)
+                if pair in last_signals and time.time() - last_signals[pair] < 1800:
                     continue
                     
                 prices = get_candles(pair, n=800)
                 rsi_series = calc_rsi(prices)
                 curr_rsi = rsi_series.iloc[-1]
                 
-                if pd.isna(curr_rsi):
-                    continue
-                if not is_market_ok(prices, curr_rsi):
+                if pd.isna(curr_rsi) or not is_market_ok(prices, curr_rsi):
+                    await asyncio.sleep(0.5)
                     continue
 
-                if curr_rsi <= 32 or curr_rsi >= 68:
+                if curr_rsi <= 30 or curr_rsi >= 70:
                     win_rate, direction, similar = check_history(prices, curr_rsi)
-                    if win_rate >= 78 and similar >= 10:
-                        expire = "3 МИН ⏰⏰⏰" if curr_rsi <= 28 or curr_rsi >= 72 else "2 МИН ⏰"
+                    # Повышенная планка точности: от 80% уверенности
+                    if win_rate >= 80 and similar >= 12:
+                        expire = "3 МИН ⏰⏰⏰" if curr_rsi <= 26 or curr_rsi >= 74 else "2 МИН ⏰"
                         t_dir = "ВНИЗ 🔴📉" if "ВНИЗ" in direction else "ВВЕРХ 🟢📈"
                         type_text = "ОТС" if "OTC" in pair else "ФОРЕКС"
                         
                         msg = (
-                            f"🔥 <b>БРОДЯГА SCHEDULE</b> {'⬇️' if 'ВНИЗ' in direction else '⬆️'}🔥\n"
+                            f"🔥 <b>БРОДЯГА СИГНАЛ</b> {'⬇️' if 'ВНИЗ' in direction else '⬆️'}🔥\n"
                             f"💰 Актив: <b>{pair}</b> ({type_text})\n"
                             f"📊 RSI: {curr_rsi:.1f}\n"
                             f"🎯 <b>ВРЕМЯ: {t_dir}</b>\n"
@@ -203,18 +207,19 @@ async def main():
                         
                         await send_signal(msg)
                         last_signals[pair] = time.time()
-                        found = 1
-                        print(f"💎 Сигнал отправлен! {pair} {t_dir} WR:{win_rate:.0f}% [{mode_text}]")
-                        await asyncio.sleep(10)
-                        break
-                        
-                await asyncio.sleep(0.7)
-                
-            await asyncio.sleep(25 if found else 40)
+                        last_global_signal_time = time.time()
+                        signal_sent = True
+                        print(f"💎 Отправлен сильный сигнал: {pair} {t_dir} WR:{win_rate:.0f}%")
+                        break  # Выходим из цикла пар, ждем следующую минуту
+
+                await asyncio.sleep(0.8)
+
+            # Если сигнал не нашли, пауза перед следующим циклом сканирования
+            await asyncio.sleep(15 if signal_sent else 10)
             
         except Exception as e:
             print(f"Main loop error: {e}")
-            await asyncio.sleep(60)
+            await asyncio.sleep(30)
 
 if __name__ == "__main__":
     asyncio.run(main())
