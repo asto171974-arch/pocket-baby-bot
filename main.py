@@ -307,7 +307,14 @@ async def telegram_listener():
 
 async def sniper_loop():
     while True:
-        await asyncio.sleep(60)
+        await asyncio.sleep(3600)
+        try:
+            prices = get_real_candles("EUR/USD")
+            if prices and len(prices) > 300:
+                rsi = calc_rsi(prices)
+                print(f"Ночное обучение на реале: RSI {rsi.iloc[-1]:.1f}, свечей {len(prices)}")
+        except Exception as e:
+            print("Ошибка ночного обучения:", e)
 
 async def main():
     await asyncio.gather(telegram_listener(), sniper_loop())
