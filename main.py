@@ -97,44 +97,45 @@ async def send_menu(chat_id):
     async with httpx.AsyncClient() as c:
         await c.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "Выбирай:\nМажоры - бот сам\nOTC - кидай скрин 1м", "reply_markup": {"inline_keyboard": kb}})
 
-async def listener():
+async def telegram_listener():
     offset = 0
-    while True:
-        try:
-            async with httpx.AsyncClient() as c:
-                r = await c.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?offset={offset}&timeout=30", timeout=35)
+    async with httpx.AsyncClient(timeout=30) as client:
+        while True:
+            try:
+                r = await client.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates", params={"offset": offset, "timeout": 25})
                 data = r.json()
-            for up in data.get("result", []):
-                offset = up["update_id"] + 1
-                if "callback_query" in up:
-                    q = up["callback_query"]
-                    chat_id = q["message"]["chat"]["id"]
-                    d = q["data"]
-                    await c.post(f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery", json={"callback_query_id": q["id"]})
-                    if d.startswith("major_"):
-                        pair = d.replace("major_", "")
-                        await send(chat_id, f"Проверяю {pair} по реальным свечам...")
-                        res = check_major(pair)
-                        await send(chat_id, res or "Нет сетапа, жди")
-                    elif d.startswith("otc_"):
-                        state["mode"] = "otc"
-                        await send(chat_id, f"Режим {d.replace('otc_','')}\nКидай скрин графика 1м как обычно")
-                elif "message" in up:
-                    msg = up["message"]
-                    chat_id = msg["chat"]["id"]
-                    if msg.get("text","").startswith("/start"):
-                        await send_menu(chat_id)
-                    if "photo" in msg and state["mode"] == "otc":
-                        file_id = msg["photo"][-1]["file_id"]
-                        async with httpx.AsyncClient() as c:
-                            f = await c.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}")
-                            path = f.json()["result"]["file_path"]
-                            img_data = await c.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{path}")
-                            open("/tmp/s.jpg","wb").write(img_data.content)
-                        res, rsi = analyze_otc_photo("/tmp/s.jpg")
-                        await send(chat_id, res or "Не разобрал скрин")
-        except Exception as e:
-            print(e)
-            await asyncio.sleep(5)
+                for upd in data.get("result", []):
+                    offset = upd["update_id"] + 1
+                    print("UPDATE:", upd) # <-- это покажет в логах
+
+                    # Нажатие кнопки
+                    if "callback_query" in upd:
+                        call = upd["callback_query"]
+                        chat_id = call["message"]["chat"]["id"]
+                        data_call = call["data"]
+                        print("BUTTON PRESS:", data_call)
+
+                        if data_call == "EUR/USD-OTC":
+                            sniper_state["active"] = True
+                            sniper_state["target_pair"] = "EUR/USD"
+                            sniper_state["chat_id"] = chat_id
+                            await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={
+                                "chat_id": chat_id,
+                                "text": "✅ EUR/USD-OTC выбран\nКидай скрин графика M1, я по EMA50 скажу ВВЕРХ/ВНИЗ/ЖДИ"
+                            })
+                        # ... остальные пары так же
+
+                    # Фото-скрин от тебя
+                    if "message" in upd and "photo" in upd["message"]:
+                        chat_id = upd["message"]["chat"]["id"]
+                        await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={
+                            "chat_id": chat_id,
+                            "text": "📸 Скрин получил, анализирую по EMA50..."
+                        })
+                        # тут твой analyze_otc_screenshot
+
+            except Exception as e:
+                print("Listener error:", e)
+                await asyncio.sleep(3)
 
 asyncio.run(listener())
