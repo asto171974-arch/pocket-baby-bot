@@ -1,7 +1,4 @@
-import os
-import time
-import asyncio
-import cv2
+import os, time, asyncio, cv2, json
 import pandas as pd
 import numpy as np
 import httpx
@@ -14,7 +11,7 @@ class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Brodyaga v3.3 OTC Expiration 1-2m running")
+        self.wfile.write(b"Brodyaga v3 running")
     def log_message(self, *args): pass
 
 Thread(target=lambda: HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 10000))), HealthHandler).serve_forever(), daemon=True).start()
@@ -23,7 +20,13 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 TWELVE_KEY = os.getenv("TWELVEDATA_API_KEY")
 MAJORS = ["EUR/USD", "GBP/USD", "USD/JPY", "EUR/JPY", "AUD/USD"]
 
-sniper_state = {"waiting_photo": False, "chat_id": None, "last_signal_time": 0}
+sniper_state = {"waiting_photo": False, "chat_id": None, "last_signal_time": 0, "mode": None}
+
+# --- ОБУЧЕНИЕ ---
+TRAIN_DIR = "/tmp/train"
+os.makedirs(TRAIN_DIR, exist_ok=True)
+DATASET = os.path.join(TRAIN_DIR, "dataset.csv")
+MODEL_FILE = os.path.join(TRAIN_DIR, "model.json")
 
 def calc_rsi(prices, period=14):
     df = pd.Series(prices)
@@ -45,67 +48,150 @@ def get_real_candles(pair):
 
 def is_market_open():
     now = datetime.now(ZoneInfo("Europe/Moscow"))
-    if now.weekday() in [5, 6]: # Суббота, Воскресенье
+    if now.weekday() == 5:
+        return False
+    if now.weekday() == 6:
         return False
     if now.weekday() == 0 and now.hour < 3:
         return False
     return True
 
-# ==================== АНАЛИЗ ИСТОЩЕНИЯ ИМПУЛЬСА (OTC) ====================
+def extract_candles_from_screen(photo_path):
+    img = cv2.imread(photo_path)
+    if img is None:
+        return []
+    h, w = img.shape[:2]
+    chart = img[int(h*0.15):int(h*0.70), int(w*0.05):int(w*0.98)]
+    hsv = cv2.cvtColor(chart, cv2.COLOR_BGR2HSV)
+    green = cv2.inRange(hsv, np.array([35,40,40]), np.array([85,255,255]))
+    red1 = cv2.inRange(hsv, np.array([0,40,40]), np.array([10,255,255]))
+    red2 = cv2.inRange(hsv, np.array([160,40,40]), np.array([180,255,255]))
+    mask = cv2.bitwise_or(green, cv2.bitwise_or(red1, red2))
+    candles = []
+    x = 0
+    while x < mask.shape[1]:
+        col = np.where(mask[:, x] > 0)[0]
+        if len(col) > 5:
+            top, bottom = col.min(), col.max()
+            center = (top + bottom) / 2
+            is_green = green[:, x].max() > 0
+            candles.append({"x": x, "top": int(top), "bottom": int(bottom), "center": float(center), "green": bool(is_green)})
+            x += 8
+        else:
+            x += 2
+    return candles
+
+def features_from_candles(candles):
+    if len(candles) < 10:
+        return None
+    centers = np.array([c["center"] for c in candles])
+    prices = centers.max() - centers
+    deltas = np.diff(prices)
+    impulse = np.abs(deltas[-6:-1]).sum()
+    exhaustion_ratio = abs(deltas[-1]) / (abs(deltas[-2]) + 1e-6) if len(deltas) >= 2 else 1
+    ema20 = pd.Series(prices).ewm(span=20).mean().iloc[-1]
+    dist_ema = prices[-1] - ema20
+    rsi_series = calc_rsi(prices)
+    rsi_val = rsi_series.iloc[-1] if not np.isnan(rsi_series.iloc[-1]) else 50
+    return {
+        "impulse": float(impulse),
+        "exhaustion_ratio": float(exhaustion_ratio),
+        "dist_ema": float(dist_ema),
+        "rsi": float(rsi_val),
+        "last_green": bool(candles[-1]["green"]),
+        "n_candles": len(candles)
+    }
+
+def save_sample(photo_path, platform="pocket"):
+    candles = extract_candles_from_screen(photo_path)
+    feat = features_from_candles(candles)
+    if not feat:
+        return False
+    feat["platform"] = platform
+    feat["time"] = datetime.now().isoformat()
+    feat["label"] = ""
+    df = pd.DataFrame([feat])
+    if os.path.exists(DATASET):
+        df.to_csv(DATASET, mode='a', header=False, index=False)
+    else:
+        df.to_csv(DATASET, index=False)
+    return True
+
+def train_model():
+    if not os.path.exists(DATASET):
+        return {"msg": "Нет данных. Кидай фото через ОБУЧЕНИЕ"}
+    df = pd.read_csv(DATASET)
+    df = df[df["label"] != ""]
+    if len(df) < 5:
+        return {"msg": f"Мало размеченных фото: {len(df)}/20. После каждого фото пиши ВВЕРХ или ВНИЗ"}
+    best = {"thr": 0.5, "acc": 0}
+    for thr in [0.4, 0.5, 0.6, 0.7, 0.8]:
+        pred = []
+        for _, r in df.iterrows():
+            if r["impulse"] > 30 and r["exhaustion_ratio"] < thr:
+                pred.append("ВНИЗ" if r["dist_ema"] > 0 else "ВВЕРХ")
+            else:
+                pred.append("ЖДИ")
+        acc = (np.array(pred) == df["label"].values).mean()
+        if acc > best["acc"]:
+            best = {"thr": thr, "acc": float(acc)}
+    model = {"exhaustion_thr": best["thr"], "accuracy_on_train": best["acc"], "samples": len(df)}
+    json.dump(model, open(MODEL_FILE, "w"))
+    return model
+
+def get_thr():
+    if os.path.exists(MODEL_FILE):
+        try:
+            return json.load(open(MODEL_FILE)).get("exhaustion_thr", 0.5)
+        except:
+            return 0.5
+    return 0.5
+
+# --- АНАЛИЗ OTC ПО СКРИНУ ---
 def analyze_otc_screenshot(photo_path):
     img = cv2.imread(photo_path)
     if img is None:
-        return None, 0, 0
+        return None, 0
     h, w = img.shape[:2]
     chart = img[int(h*0.18):int(h*0.65), 0:int(w*0.95)]
     if chart.size == 0:
-        return None, 0, 0
-
+        return None, 0
     hsv = cv2.cvtColor(chart, cv2.COLOR_BGR2HSV)
     green_mask = cv2.inRange(hsv, np.array([35,50,50]), np.array([85,255,255]))
     red_mask1 = cv2.inRange(hsv, np.array([0,50,50]), np.array([10,255,255]))
     red_mask2 = cv2.inRange(hsv, np.array([160,50,50]), np.array([180,255,255]))
     candles_mask = cv2.bitwise_or(green_mask, cv2.bitwise_or(red_mask1, red_mask2))
-
     prices = []
     for x in range(candles_mask.shape[1]-5, 0, -2):
         col = np.where(candles_mask[:, x] > 0)[0]
         if len(col) > 0:
             prices.append(chart.shape[0] - col.mean())
-
-    if len(prices) < 30:
-        return None, 0, 0
-
+    if len(prices) < 50:
+        return None, 0
     prices = prices[::-1]
-
-    # Кулдаун 2 минуты между сигналами
+    ema50 = pd.Series(prices).ewm(span=50).mean().iloc[-1]
+    curr_price = prices[-1]
+    rsi = calc_rsi(prices).iloc[-1]
     if time.time() - sniper_state["last_signal_time"] < 120:
-        return "СТОП, ПОДОЖДИ 2 МИН ПОСЛЕ СИГНАЛА", 0, 0
-
-    deltas = np.diff(prices)
-    if len(deltas) < 6:
-        return None, 0, 0
-
-    recent_deltas = deltas[-5:]
-    signal = None
-
-    # Логика истощения движения (вход против локального дожима)
-    if all(d > 0 for d in recent_deltas[-4:-1]) and recent_deltas[-1] < recent_deltas[-2] * 0.5:
-        signal = "ВНИЗ 🔴 (Истощение роста)"
-    elif all(d < 0 for d in recent_deltas[-4:-1]) and abs(recent_deltas[-1]) < abs(recent_deltas[-2]) * 0.5:
-        signal = "ВВЕРХ 🟢 (Истощение падения)"
-
-    if not signal:
-        return None, 0, 0
-
-    return signal, 85, len(prices)
+        return "СТОП, ПОДОЖДИ 2 МИН ПОСЛЕ СИГНАЛА", rsi
+    recent = prices[-30:]
+    impulse = max(recent) - min(recent)
+    trend_up = curr_price > recent[0]
+    thr = get_thr()
+    # используем обученный порог если есть
+    deltas = np.diff(prices[-10:])
+    exhaustion = abs(deltas[-1]) / (abs(deltas[-2]) + 1e-6) if len(deltas) >= 2 else 1
+    if curr_price > ema50 and rsi < 50 and impulse > 40 and not trend_up and exhaustion < thr:
+        return "ВВЕРХ", rsi
+    if curr_price < ema50 and rsi > 50 and impulse > 40 and trend_up and exhaustion < thr:
+        return "ВНИЗ", rsi
+    return None, rsi
 
 async def send_text(chat_id, text):
     async with httpx.AsyncClient() as c:
         await c.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
                      json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
 
-# ==================== МАЖОРЫ (РЕАЛ TWELVE DATA) ====================
 async def check_major_signal(pair, chat_id):
     if not is_market_open():
         await send_text(chat_id, "Реал закрыт до понедельника. Пиши OTC и кидай скрин.")
@@ -140,7 +226,7 @@ async def check_major_signal(pair, chat_id):
 
 async def telegram_listener():
     offset = 0
-    print("Бот запущен с экспирацией 1-2м для OTC...")
+    print("Бот слушает...")
     async with httpx.AsyncClient(timeout=30) as client:
         while True:
             try:
@@ -156,17 +242,39 @@ async def telegram_listener():
                     text = msg.get("text", "").strip()
 
                     if text == "/start":
-                        await send_text(chat_id, "Привет!\n1. Напиши пару (например `EUR/USD`) — бот проверит реал.\n2. Напиши `OTC` — бот попросит скриншот (экспирация 1-2 мин).")
+                        await send_text(chat_id, "Привет\nEUR/USD - реал\nOTC - скрин\nОБУЧЕНИЕ - кидай 15м фото\nОБУЧИТЬ - обучить после 20 фото")
                     elif text == "/stop":
                         sniper_state["waiting_photo"] = False
+                        sniper_state["mode"] = None
                         await send_text(chat_id, "Остановлен")
                     elif text in MAJORS:
                         await send_text(chat_id, f"Проверяю {text} по реальным свечам...")
                         asyncio.create_task(check_major_signal(text, chat_id))
-                    elif text.upper() == "OTC":
+                    elif text == "OTC":
                         sniper_state["waiting_photo"] = True
+                        sniper_state["mode"] = "otc"
                         sniper_state["chat_id"] = chat_id
-                        await send_text(chat_id, "📷 Кидай скриншот OTC-графика (1м). Жду истощение импульса для входа на 1-2 минуты.")
+                        await send_text(chat_id, "Кидай скрин EUR/USD-OTC 1м")
+                    elif text == "ОБУЧЕНИЕ":
+                        sniper_state["waiting_photo"] = True
+                        sniper_state["mode"] = "train"
+                        sniper_state["chat_id"] = chat_id
+                        await send_text(chat_id, "Кидай фото 15м. Сначала 10 с Бинариума, потом 10 с Покета. После каждого фото напиши ВВЕРХ или ВНИЗ что было дальше")
+                    elif text == "ОБУЧИТЬ":
+                        model = train_model()
+                        await send_text(chat_id, f"Готово: {model}")
+                    elif text in ["ВВЕРХ", "ВНИЗ"]:
+                        # ставим label последнему фото
+                        if os.path.exists(DATASET):
+                            df = pd.read_csv(DATASET)
+                            if len(df) > 0 and df.iloc[-1]["label"] == "":
+                                df.iloc[-1, df.columns.get_loc("label")] = text
+                                df.to_csv(DATASET, index=False)
+                                await send_text(chat_id, f"Записал {text}. Кидай следующее фото или напиши ОБУЧИТЬ")
+                            else:
+                                await send_text(chat_id, "Сначала кидай фото")
+                        else:
+                            await send_text(chat_id, "Сначала кидай фото через ОБУЧЕНИЕ")
 
                     if "photo" in msg and sniper_state["waiting_photo"]:
                         file_id = msg["photo"][-1]["file_id"]
@@ -176,16 +284,23 @@ async def telegram_listener():
                         photo_data = await client.get(photo_url)
                         open("/tmp/screen.jpg", "wb").write(photo_data.content)
 
-                        direction, confidence, count = analyze_otc_screenshot("/tmp/screen.jpg")
-                        
-                        if direction and "СТОП" in direction:
-                            await send_text(chat_id, direction)
-                        elif direction:
-                            await send_text(chat_id, f"🔥 **OTC СНАЙПЕР (ИСТОЩЕНИЕ)**\n\nСигнал: **{direction}**\nТочек анализа: `{count}`\n⏱ **Экспирация: 1–2 мин**\n⚠️ *Торговля против дожима маркет-мейкера*")
-                            sniper_state["last_signal_time"] = time.time()
+                        if sniper_state["mode"] == "train":
+                            ok = save_sample("/tmp/screen.jpg", platform="pocket")
+                            if ok:
+                                await send_text(chat_id, "Фото сохранил для обучения. Теперь напиши ВВЕРХ или ВНИЗ что было на следующей свече")
+                            else:
+                                await send_text(chat_id, "Не смог вытащить свечи с фото. Скинь другой скрин 15м")
                         else:
-                            await send_text(chat_id, f"💤 ЖДИ. Импульс сильный, истощения нет. Ждем разворотную точку.")
+                            direction, rsi = analyze_otc_screenshot("/tmp/screen.jpg")
+                            if direction and "СТОП" in direction:
+                                await send_text(chat_id, direction)
+                            elif direction:
+                                await send_text(chat_id, f"OTC СИГНАЛ\n{direction}\nRSI: {rsi:.1f}\nЭкспирация 1-2м\nТолько демка")
+                                sniper_state["last_signal_time"] = time.time()
+                            else:
+                                await send_text(chat_id, f"ЖДИ. Нет сетапа. RSI: {rsi:.1f}")
                         sniper_state["waiting_photo"] = False
+                        sniper_state["mode"] = None
             except Exception as e:
                 print("Ошибка:", e)
                 await asyncio.sleep(3)
