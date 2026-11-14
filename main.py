@@ -90,11 +90,9 @@ def analyze_otc_screenshot(photo_path):
     impulse = max(recent) - min(recent)
     trend_up = curr_price > recent[0]
 
-# RSI был выше 65 и сейчас падает + цена делает красные свечи = ВНИЗ
 if rsi > 55 and rsi < 70 and curr_price < prices[-2] and curr_price < prices[-3]:
     return "ВНИЗ 🔴 RSI с 69 падает", rsi
 
-# RSI был ниже 35 и сейчас растёт + зелёные свечи = ВВЕРХ
 if rsi < 45 and rsi > 30 and curr_price > prices[-2] and curr_price > prices[-3]:
     return "ВВЕРХ 🟢 RSI со дна растёт", rsi
 
