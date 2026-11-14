@@ -147,6 +147,51 @@ def get_thr():
             return 0.5
     return 0.5
 
+async def collect_majors_loop():
+    print("Ночной сбор мажоров запущен...")
+    while True:
+        try:
+            for pair in MAJORS:
+                prices = get_real_candles(pair)
+                if not prices or len(prices) < 100:
+                    continue
+                # берём последние 50 свечей как пример
+                window = prices[-60:-3]
+                future = prices[-3] - prices[-6]
+                label = "ВВЕРХ" if future > 0 else "ВНИЗ"
+                # считаем фичи как для фото, но по реальным ценам
+                deltas = np.diff(window)
+                impulse = np.abs(deltas[-6:-1]).sum()
+                exhaustion_ratio = abs(deltas[-1]) / (abs(deltas[-2]) + 1e-6)
+                ema20 = pd.Series(window).ewm(span=20).mean().iloc[-1]
+                dist_ema = window[-1] - ema20
+                rsi_val = calc_rsi(window).iloc[-1]
+                if np.isnan(rsi_val):
+                    rsi_val = 50
+                row = {
+                    "impulse": float(impulse),
+                    "exhaustion_ratio": float(exhaustion_ratio),
+                    "dist_ema": float(dist_ema),
+                    "rsi": float(rsi_val),
+                    "last_green": bool(window[-1] > window[-2]),
+                    "n_candles": len(window),
+                    "platform": pair,
+                    "time": datetime.now().isoformat(),
+                    "label": label
+                }
+                df = pd.DataFrame([row])
+                if os.path.exists(DATASET):
+                    df.to_csv(DATASET, mode='a', header=False, index=False)
+                else:
+                    df.to_csv(DATASET, index=False)
+                print(f"Собрал {pair} -> {label}")
+            # после каждого круга пробуем обучиться
+            m = train_model()
+            print(f"Модель после сбора: {m}")
+        except Exception as e:
+            print("Ошибка сбора:", e)
+        await asyncio.sleep(300)  # 5 минут
+
 # --- АНАЛИЗ OTC ПО СКРИНУ ---
 def analyze_otc_screenshot(photo_path):
     img = cv2.imread(photo_path)
@@ -317,7 +362,7 @@ async def sniper_loop():
             print("Ошибка ночного обучения:", e)
 
 async def main():
-    await asyncio.gather(telegram_listener(), sniper_loop())
+    await asyncio.gather(telegram_listener(), sniper_loop(),coll ect_majors_loop())
 
 if __name__ == "__main__":
     asyncio.run(main())
