@@ -36,6 +36,37 @@ def get_real_candles(pair):
         return [float(x['close']) for x in reversed(r['values'])]
     except: return None
 
+if text == "/stop":
+    bot_active = False
+    await send_message("🛑 Остановлен")
+    continue
+# только потом проверяй GBP/USD, EUR/USD и т.д.
+
+if "GBP/USD" in text:
+    await send_message("Проверяю GBP/USD по реальным свечам...")
+    # НЕ ждём тут, запускаем фоном
+    asyncio.create_task(check_pair(chat_id, "GBP/USD"))
+    continue # сразу идём слушать дальше
+
+from datetime import datetime
+import pytz
+
+def is_market_open():
+    now = datetime.now(pytz.timezone('Europe/Moscow'))
+    # forex: пн 00:00 - сб 00:00 по Москве примерно
+    if now.weekday() == 5 and now.hour >= 0: # суббота
+        return False
+    if now.weekday() == 6: # воскресенье
+        return False
+    if now.weekday() == 0 and now.hour < 3: # понедельник до 03:00
+        return False
+    return True
+
+# в обработчике когда пишет GBP/USD
+if not is_market_open():
+    await send("Лошара, реал закрыт до понедельника. Хочешь сигнал - пиши OTC и кидай скрин, или жди понедельника.")
+    return
+
 # --- АНАЛИЗ OTC ПО ТВОЕМУ СКРИНУ ---
 def analyze_otc_screenshot(photo_path):
     img = cv2.imread(photo_path)
