@@ -90,13 +90,13 @@ def analyze_otc_screenshot(photo_path):
     impulse = max(recent) - min(recent)
     trend_up = curr_price > recent[0]
 
-    # УП: был сильный импульс вниз, сейчас цена пробила EMA50 вверх
-    if curr_price > ema50 and rsi < 50 and impulse > 40 and not trend_up:
-        return "ВВЕРХ 🟢", rsi
+# RSI был выше 65 и сейчас падает + цена делает красные свечи = ВНИЗ
+if rsi > 55 and rsi < 70 and curr_price < prices[-2] and curr_price < prices[-3]:
+    return "ВНИЗ 🔴 RSI с 69 падает", rsi
 
-    # ВНИЗ: был сильный импульс вверх, сейчас цена пробила EMA50 вниз
-    if curr_price < ema50 and rsi > 50 and impulse > 40 and trend_up:
-        return "ВНИЗ 🔴", rsi
+# RSI был ниже 35 и сейчас растёт + зелёные свечи = ВВЕРХ
+if rsi < 45 and rsi > 30 and curr_price > prices[-2] and curr_price > prices[-3]:
+    return "ВВЕРХ 🟢 RSI со дна растёт", rsi
 
     return None, rsi
 
