@@ -160,7 +160,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-*Что в Environment на Render должно быть:*
+    
 - `BOT_TOKEN` = твой токен от BotFather
 - `TWELVEDATA_API_KEY` = твой ключ
 - `PORT` = 10000 (Render сам даст)
