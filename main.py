@@ -239,7 +239,7 @@ async def telegram_listener():
                     chat_id = msg.get("chat", {}).get("id")
                     if not chat_id:
                         continue
-                    text = msg.get("text", "").strip()
+                    text = msg.get("text", "").strip().upper()
 
                     if text == "/start":
                         await send_text(chat_id, "Привет\nEUR/USD - реал\nOTC - скрин\nОБУЧЕНИЕ - кидай 15м фото\nОБУЧИТЬ - обучить после 20 фото")
