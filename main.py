@@ -5,7 +5,6 @@ import httpx
 from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
-import pytz
 
 # --- ЧТОБ RENDER НЕ СДОХ ---
 class HealthHandler(BaseHTTPRequestHandler):
@@ -42,12 +41,13 @@ def get_real_candles(pair):
         return None
 
 def is_market_open():
-    now = datetime.now(pytz.timezone('Europe/Moscow'))
-    if now.weekday() == 5:  # суббота
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo("Europe/Moscow"))
+    if now.weekday() == 5:
         return False
-    if now.weekday() == 6:  # воскресенье
+    if now.weekday() == 6: 
         return False
-    if now.weekday() == 0 and now.hour < 3:  # понедельник до 03:00
+    if now.weekday() == 0 and now.hour < 3:
         return False
     return True
 
