@@ -14,7 +14,7 @@ class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Brodyaga v3.1 OTC History running")
+        self.wfile.write(b"Brodyaga v3.3 OTC Expiration 1-2m running")
     def log_message(self, *args): pass
 
 Thread(target=lambda: HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 10000))), HealthHandler).serve_forever(), daemon=True).start()
@@ -51,15 +51,15 @@ def is_market_open():
         return False
     return True
 
-# ==================== ЛОКАЛЬНЫЙ БЭКТЕСТ ПО СНИМКУ ОТС ====================
+# ==================== АНАЛИЗ ИСТОЩЕНИЯ ИМПУЛЬСА (OTC) ====================
 def analyze_otc_screenshot(photo_path):
     img = cv2.imread(photo_path)
     if img is None:
-        return None, 0, 0, 0
+        return None, 0, 0
     h, w = img.shape[:2]
     chart = img[int(h*0.18):int(h*0.65), 0:int(w*0.95)]
     if chart.size == 0:
-        return None, 0, 0, 0
+        return None, 0, 0
 
     hsv = cv2.cvtColor(chart, cv2.COLOR_BGR2HSV)
     green_mask = cv2.inRange(hsv, np.array([35,50,50]), np.array([85,255,255]))
@@ -73,53 +73,39 @@ def analyze_otc_screenshot(photo_path):
         if len(col) > 0:
             prices.append(chart.shape[0] - col.mean())
 
-    if len(prices) < 60:
-        return None, 0, 0, 0
+    if len(prices) < 30:
+        return None, 0, 0
 
     prices = prices[::-1]
-    rsi_series = calc_rsi(prices)
-    curr_rsi = rsi_series.iloc[-1]
-    curr_price = prices[-1]
-    ema21 = pd.Series(prices).ewm(span=21).mean()
 
-    # Защита от частого спама (кулдаун 2 минуты)
+    # Кулдаун 2 минуты между сигналами
     if time.time() - sniper_state["last_signal_time"] < 120:
-        return "СТОП, ПОДОЖДИ 2 МИН ПОСЛЕ СИГНАЛА", curr_rsi, 0, 0
+        return "СТОП, ПОДОЖДИ 2 МИН ПОСЛЕ СИГНАЛА", 0, 0
 
-    # Проводим локальный бэктест по историческим свечам на скриншоте
-    similar = 0
-    wins_up = 0
-    wins_down = 0
+    deltas = np.diff(prices)
+    if len(deltas) < 6:
+        return None, 0, 0
 
-    for i in range(25, len(prices) - 5):
-        if pd.isna(rsi_series.iloc[i]):
-            continue
-        # Ищем похожие точки по RSI и положению относительно EMA
-        if abs(rsi_series.iloc[i] - curr_rsi) < 3.0 and (prices[i] > ema21.iloc[i]) == (curr_price > ema21.iloc[-1]):
-            similar += 1
-            future_diff = prices[i + 3] - prices[i]
-            if future_diff > 0:
-                wins_up += 1
-            else:
-                wins_down += 1
+    recent_deltas = deltas[-5:]
+    signal = None
 
-    if similar < 5:
-        return None, curr_rsi, 0, similar
+    # Логика истощения движения (вход против локального дожима)
+    if all(d > 0 for d in recent_deltas[-4:-1]) and recent_deltas[-1] < recent_deltas[-2] * 0.5:
+        signal = "ВНИЗ 🔴 (Истощение роста)"
+    elif all(d < 0 for d in recent_deltas[-4:-1]) and abs(recent_deltas[-1]) < abs(recent_deltas[-2]) * 0.5:
+        signal = "ВВЕРХ 🟢 (Истощение падения)"
 
-    win_rate = max(wins_up, wins_down) / similar * 100
-    
-    # Требуем точность от 75% на видимой истории скриншота
-    if win_rate < 75:
-        return None, curr_rsi, win_rate, similar
+    if not signal:
+        return None, 0, 0
 
-    direction = "ВВЕРХ 🟢" if wins_up > wins_down else "ВНИЗ 🔴"
-    return direction, curr_rsi, win_rate, similar
+    return signal, 85, len(prices)
 
 async def send_text(chat_id, text):
     async with httpx.AsyncClient() as c:
         await c.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
                      json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
 
+# ==================== МАЖОРЫ (РЕАЛ TWELVE DATA) ====================
 async def check_major_signal(pair, chat_id):
     if not is_market_open():
         await send_text(chat_id, "Реал закрыт до понедельника. Пиши OTC и кидай скрин.")
@@ -154,7 +140,7 @@ async def check_major_signal(pair, chat_id):
 
 async def telegram_listener():
     offset = 0
-    print("Бот слушает с историческим анализом OTC...")
+    print("Бот запущен с экспирацией 1-2м для OTC...")
     async with httpx.AsyncClient(timeout=30) as client:
         while True:
             try:
@@ -170,7 +156,7 @@ async def telegram_listener():
                     text = msg.get("text", "").strip()
 
                     if text == "/start":
-                        await send_text(chat_id, "Привет!\n1. Напиши пару (например `EUR/USD`) — бот проверит реал.\n2. Напиши `OTC` — бот попросит скриншот и проведет исторический бэктест.")
+                        await send_text(chat_id, "Привет!\n1. Напиши пару (например `EUR/USD`) — бот проверит реал.\n2. Напиши `OTC` — бот попросит скриншот (экспирация 1-2 мин).")
                     elif text == "/stop":
                         sniper_state["waiting_photo"] = False
                         await send_text(chat_id, "Остановлен")
@@ -180,7 +166,7 @@ async def telegram_listener():
                     elif text.upper() == "OTC":
                         sniper_state["waiting_photo"] = True
                         sniper_state["chat_id"] = chat_id
-                        await send_text(chat_id, "📷 Кидай скриншот OTC-графика (1м), я посчитаю историю и винрейт.")
+                        await send_text(chat_id, "📷 Кидай скриншот OTC-графика (1м). Жду истощение импульса для входа на 1-2 минуты.")
 
                     if "photo" in msg and sniper_state["waiting_photo"]:
                         file_id = msg["photo"][-1]["file_id"]
@@ -190,15 +176,15 @@ async def telegram_listener():
                         photo_data = await client.get(photo_url)
                         open("/tmp/screen.jpg", "wb").write(photo_data.content)
 
-                        direction, rsi, wr, similar = analyze_otc_screenshot("/tmp/screen.jpg")
+                        direction, confidence, count = analyze_otc_screenshot("/tmp/screen.jpg")
                         
                         if direction and "СТОП" in direction:
                             await send_text(chat_id, direction)
                         elif direction:
-                            await send_text(chat_id, f"🔥 **OTC СНАЙПЕРСКИЙ СИГНАЛ**\n\nНаправление: **{direction}**\nRSI: `{rsi:.1f}`\nИсторический Винрейт: **{wr:.0f}%**\nСовпадений в истории скриншота: `{similar}`\nЭкспирация: `2-3 мин`\n⚠️ *Только демо-счет*")
+                            await send_text(chat_id, f"🔥 **OTC СНАЙПЕР (ИСТОЩЕНИЕ)**\n\nСигнал: **{direction}**\nТочек анализа: `{count}`\n⏱ **Экспирация: 1–2 мин**\n⚠️ *Торговля против дожима маркет-мейкера*")
                             sniper_state["last_signal_time"] = time.time()
                         else:
-                            await send_text(chat_id, f"💤 ЖДИ. Нет сильного сетапа (винрейт ниже 75%).\nRSI: `{rsi:.1f}`, похожих точек: `{similar}`")
+                            await send_text(chat_id, f"💤 ЖДИ. Импульс сильный, истощения нет. Ждем разворотную точку.")
                         sniper_state["waiting_photo"] = False
             except Exception as e:
                 print("Ошибка:", e)
