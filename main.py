@@ -69,7 +69,7 @@ def extract_candles_from_screen(photo_path):
             x += 8
         else: x += 2
     return candles
-
+    
 def features_from_candles(candles):
     if len(candles) < 10: return None
     centers = np.array([c["center"] for c in candles])
@@ -81,7 +81,26 @@ def features_from_candles(candles):
     dist_ema = prices[-1] - ema20
     rsi_series = calc_rsi(prices)
     rsi_val = rsi_series.iloc[-1] if not np.isnan(rsi_series.iloc[-1]) else 50
-    return {"impulse": float(impulse), "exhaustion_ratio": float(exhaustion_ratio), "dist_ema": float(dist_ema), "rsi": float(rsi_val), "last_green": bool(candles[-1]["green"]), "n_candles": len(candles)}
+
+    # ТВОЙ ПАТТЕРН: дожи + фейк
+    # дожи = тело маленькое относительно тени
+    last = candles[-1]
+    body = abs(last["bottom"] - last["top"])
+    # у нас нет тени отдельно, считаем по размеру свечи
+    prev_sizes = [abs(c["bottom"] - c["top"]) for c in candles[-6:-1]]
+    avg_size = np.mean(prev_sizes) if prev_sizes else body
+    is_doji = 1 if body < avg_size * 0.35 else 0  # маленькая свеча = крест
+
+    # вторая свеча пошла в сторону дожия (фейк)
+    fake_impulse = 0
+    if len(candles) >= 2:
+        # если дожи зелёный и предыдущая тоже зелёная - толпа зашла вверх
+        if candles[-1]["green"] and candles[-2]["green"]:
+            fake_impulse = 1
+        if not candles[-1]["green"] and not candles[-2]["green"]:
+            fake_impulse = 1
+
+    return {"impulse": float(impulse), "exhaustion_ratio": float(exhaustion_ratio), "dist_ema": float(dist_ema), "rsi": float(rsi_val), "last_green": bool(candles[-1]["green"]), "n_candles": len(candles), "is_doji": int(is_doji), "fake_impulse": int(fake_impulse)}
 
 def save_sample(photo_path, platform="pocket"):
     candles = extract_candles_from_screen(photo_path)
@@ -130,24 +149,53 @@ def analyze_otc_screenshot(photo_path):
     red_mask2 = cv2.inRange(hsv, np.array([160,50,50]), np.array([180,255,255]))
     candles_mask = cv2.bitwise_or(green_mask, cv2.bitwise_or(red_mask1, red_mask2))
     prices = []
+    greens = []
+    sizes = []
     for x in range(candles_mask.shape[1]-5, 0, -2):
         col = np.where(candles_mask[:, x] > 0)[0]
-        if len(col) > 0: prices.append(chart.shape[0] - col.mean())
-    if len(prices) < 50: return None, 0
+        if len(col) > 0:
+            prices.append(chart.shape[0] - col.mean())
+            greens.append(green_mask[:, x].max() > 0)
+            sizes.append(col.max() - col.min())
+    if len(prices) < 20: return None, 0
     prices = prices[::-1]
-    ema50 = pd.Series(prices).ewm(span=50).mean().iloc[-1]
-    curr_price = prices[-1]
-    rsi = calc_rsi(prices).iloc[-1]
-    if time.time() - sniper_state["last_signal_time"] < 120: return "СТОП, ПОДОЖДИ 2 МИН ПОСЛЕ СИГНАЛА", rsi
-    recent = prices[-30:]
-    impulse = max(recent) - min(recent)
-    trend_up = curr_price > recent[0]
-    thr = get_thr()
+    greens = greens[::-1]
+    sizes = sizes[::-1]
+
+    if time.time() - sniper_state["last_signal_time"] < 120:
+        return "СТОП, ПОДОЖДИ 2 МИН ПОСЛЕ СИГНАЛА", 0
+
+    # ТВОЙ СЕНАРИЙ: импульс -> дожи -> фейк -> разворот
+    # последние 3 свечи: [ -3 ] [ -2 ] [ -1 ]
+    # -1 = маленькая свеча крест
+    # -2 = вторая, идёт в сторону -1 (фейк для толпы)
+    # -3 = до этого был импульс
+    last_size = sizes[-1]
+    avg_prev = np.mean(sizes[-7:-1]) if len(sizes) >= 7 else last_size
+    is_doji = last_size < avg_prev * 0.4
+
+    # импульс до дожия был большой?
+    impulse_before = abs(prices[-3] - prices[-7]) if len(prices) >= 7 else 0
+
+    # фейк: свеча -2 и -1 одного цвета
+    fake = greens[-1] == greens[-2]
+
+    # если дожи + импульс был + фейк есть = толпа зашла, ставим ПРОТИВ
+    if is_doji and fake and impulse_before > 15:
+        # дожи зелёный после импульса вверх -> толпа на ВВЕРХ -> мы ВНИЗ
+        if greens[-1]:
+            return "ВНИЗ", 0
+        else:
+            return "ВВЕРХ", 0
+
+    # запасной вариант по старому истощению
     deltas = np.diff(prices[-10:])
     exhaustion = abs(deltas[-1]) / (abs(deltas[-2]) + 1e-6) if len(deltas) >= 2 else 1
-    if curr_price > ema50 and rsi < 50 and impulse > 40 and not trend_up and exhaustion < thr: return "ВВЕРХ", rsi
-    if curr_price < ema50 and rsi > 50 and impulse > 40 and trend_up and exhaustion < thr: return "ВНИЗ", rsi
-    return None, rsi
+    thr = get_thr()
+    if exhaustion < thr and impulse_before > 20:
+        return "ВНИЗ" if greens[-1] else "ВВЕРХ", 0
+
+    return None, 0
 
 async def send_text(chat_id, text):
     async with httpx.AsyncClient() as c:
