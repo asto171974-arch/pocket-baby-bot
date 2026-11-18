@@ -221,20 +221,22 @@ async def collect_majors_loop():
         except Exception as e:
             print("Ошибка сбора:", e)
         await asyncio.sleep(300)
+
 async def analyze_all(chat_id):
-    await send_text(chat_id, "Бро, прогоняю все 5 мажоров... 10 сек")
-    results = []
+    await send_text(chat_id, "Бро, прогоняю все 17 мажоров... 15 сек")
     if not is_market_open():
         await send_text(chat_id, "Реал закрыт до понедельника. Пиши OTC и кидай скрин.")
         return
-    for pair in MAJORS:
-        prices = get_real_candles(pair)
+
+    async def fetch_and_calc(pair):
+        prices = await asyncio.to_thread(get_real_candles, pair)
         if not prices or len(prices) < 300:
-            results.append((pair, 0, 0, "нет свечей"))
-            continue
+            return (pair, 0, 0, "нет свечей", 0)
         rsi = calc_rsi(prices)
         ema200 = pd.Series(prices).ewm(span=200).mean()
         curr_rsi = rsi.iloc[-1]
+        if pd.isna(curr_rsi):
+            curr_rsi = 50
         wins, total = 0, 0
         for i in range(200, len(prices)-5):
             if rsi.iloc[i] <= 30 and prices[i] < ema200.iloc[i]:
@@ -244,30 +246,28 @@ async def analyze_all(chat_id):
                 total += 1
                 if prices[i+3] < prices[i]: wins += 1
         if total < 20:
-            results.append((pair, 0, total, "мало статистики"))
-            continue
+            return (pair, 0, total, "мало статистики", float(curr_rsi))
         wr = wins/total*100
         direction = "ВВЕРХ" if curr_rsi <= 30 else "ВНИЗ"
-        if curr_rsi > 30 and curr_rsi < 70:
+        if 30 < curr_rsi < 70:
             direction = "ЖДИ"
-        results.append((pair, wr, total, direction, curr_rsi))
-    # сортируем по винрейту
-    results_sorted = sorted([r for r in results if len(r) > 3], key=lambda x: x[1], reverse=True)
+        return (pair, wr, total, direction, float(curr_rsi))
+
+    results = await asyncio.gather(*(fetch_and_calc(p) for p in MAJORS))
+    results_sorted = sorted([r for r in results if r[1] > 0], key=lambda x: x[1], reverse=True)
     if not results_sorted:
-        await send_text(chat_id, "Все 5 - нет данных. Проверь ключ.")
+        await send_text(chat_id, "Все 17 - нет данных. Проверь ключ.")
         return
     best = results_sorted[0]
-    text = "РЕЗУЛЬТАТ ПО 5 МАЖОРАМ:\n\n"
+    text = "РЕЗУЛЬТАТ ПО 17 МАЖОРАМ:\n\n"
     for r in results:
-        if len(r) > 3:
-            text += f"{r[0]}: {r[3]} | RSI {r[4]:.1f} | Винрейт {r[1]:.0f}% ({r[2]})\n"
-        else:
-            text += f"{r[0]}: {r[3]}\n"
+        text += f"{r[0]}: {r[3]} | RSI {r[4]:.1f} | Винрейт {r[1]:.0f}% ({r[2]})\n"
     if best[1] >= 58 and best[3] != "ЖДИ":
         text += f"\nБРО, ЗАХОДИ В {best[0]} -> {best[3]}\nВинрейт {best[1]:.0f}% - это твой сетап. Экспирация 3м"
     else:
-        text += f"\nБро, сейчас все 5 в жди. Лучший {best[0]} с {best[1]:.0f}%, но RSI не дошел. Не заходи."
+        text += f"\nБро, сейчас все в жди. Лучший {best[0]} с {best[1]:.0f}%, но RSI не дошел. Не заходи."
     await send_text(chat_id, text)
+
 async def telegram_listener():
     offset = 0
     print("Бот слушает...")
@@ -283,7 +283,7 @@ async def telegram_listener():
                     if not chat_id: continue
                     text = msg.get("text", "").strip().upper()
                     if text == "/START":
-                        await send_text(chat_id, "Привет\nEUR/USD - реал\nOTC - скрин\nОБУЧЕНИЕ - фото\nСИНХРОН - заходить со мной\nОБУЧИТЬ - обучить")
+                        await send_text(chat_id, "Привет\nEUR/USD - реал\nOTC - скрин\nОБУЧЕНИЕ - фото\nСИНХРОН - заходить со мной\nОБУЧИТЬ - обучить\nАНАЛИЗ - все 17 пар")
                     elif text == "/STOP":
                         sniper_state["waiting_photo"] = False
                         sniper_state["mode"] = None
