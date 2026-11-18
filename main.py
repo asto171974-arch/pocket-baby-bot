@@ -1,19 +1,13 @@
-import os, time, asyncio, cv2, json
+import os, time, asyncio, cv2, json, re, random, string
 import pandas as pd
 import numpy as np
 import httpx
+import websocket
 from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 from zoneinfo import ZoneInfo
-try:
-    from tvdata import websocket
-    print("ТВ подключилось")
-except Exception as e:
-    print(f"ТВ не подключилось, работаем только на TwelveData: {e}")
-    tv_feed = None
-    TvDataFeed = None
-    Interval = None
+
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -40,15 +34,51 @@ def calc_rsi(prices, period=14):
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
-    def get_from_tv(pair):
-    return None
+def tv_frame(func, params):
+    payload = json.dumps({"func": func, "params": params}, separators=(',', ':'))
+    return f"~m~{len(payload)}~m~{payload}"
+
+def get_from_tv(pair):
+    try:
+        symbol = "FX:" + pair.replace("/", "")
+        session = ''.join(random.choices(string.ascii_lowercase, k=12))
+        ws = websocket.create_connection("wss://data.tradingview.com/socket.io/websocket?EIO=4&transport=websocket", timeout=10)
+        ws.recv()
+        ws.send('42["set_session","' + session + '"]')
+        ws.recv()
+        ws.send(tv_frame("resolve_symbol", [session, "s1", symbol]))
+        ws.send(tv_frame("create_series", [session, "s1", "1", "s1", 1000]))
+        closes = []
+        end = time.time() + 8
+        while time.time() < end and len(closes) < 1000:
+            msg = ws.recv()
+            if '"s"' in msg and '"c"' in msg:
+                try:
+                    data = json.loads(msg.split("42",1)[1])
+                    for item in data[1].get("s", []):
+                        c = item.get("c")
+                        if c and len(c) >= 5:
+                            closes.append(float(c[4]))
+                except:
+                    pass
+            if len(closes) >= 300:
+                break
+        ws.close()
+        if len(closes) >= 300:
+            return closes[-1000:]
+        return None
+    except Exception as e:
+        print(f"ТВ ошибка {pair}: {e}")
+        return None
 
 def get_from_twelve(pair):
     try:
-        if not TWELVE_KEY: return None
+        if not TWELVE_KEY:
+            return None
         url = f"https://api.twelvedata.com/time_series?symbol={pair}&interval=1min&outputsize=1000&apikey={TWELVE_KEY}"
         r = httpx.get(url, timeout=15).json()
-        if 'values' not in r: return None
+        if 'values' not in r:
+            return None
         return [float(x['close']) for x in reversed(r['values'])]
     except:
         return None
@@ -62,13 +92,16 @@ def get_real_candles(pair):
 
 def is_market_open():
     now = datetime.now(ZoneInfo("Europe/Moscow"))
-    if now.weekday() >= 5: return False
-    if now.weekday() == 0 and now.hour < 3: return False
+    if now.weekday() >= 5:
+        return False
+    if now.weekday() == 0 and now.hour < 3:
+        return False
     return True
 
 def extract_candles_from_screen(photo_path):
     img = cv2.imread(photo_path)
-    if img is None: return []
+    if img is None:
+        return []
     h, w = img.shape[:2]
     chart = img[int(h*0.15):int(h*0.70), int(w*0.05):int(w*0.98)]
     hsv = cv2.cvtColor(chart, cv2.COLOR_BGR2HSV)
@@ -86,11 +119,13 @@ def extract_candles_from_screen(photo_path):
             is_green = green[:, x].max() > 0
             candles.append({"x": x, "top": int(top), "bottom": int(bottom), "center": float(center), "green": bool(is_green)})
             x += 8
-        else: x += 2
+        else:
+            x += 2
     return candles
 
 def features_from_candles(candles):
-    if len(candles) < 10: return None
+    if len(candles) < 10:
+        return None
     centers = np.array([c["center"] for c in candles])
     prices = centers.max() - centers
     deltas = np.diff(prices)
@@ -107,51 +142,65 @@ def features_from_candles(candles):
     is_doji = 1 if body < avg_size * 0.35 else 0
     fake_impulse = 0
     if len(candles) >= 2:
-        if candles[-1]["green"] and candles[-2]["green"]: fake_impulse = 1
-        if not candles[-1]["green"] and not candles[-2]["green"]: fake_impulse = 1
+        if candles[-1]["green"] and candles[-2]["green"]:
+            fake_impulse = 1
+        if not candles[-1]["green"] and not candles[-2]["green"]:
+            fake_impulse = 1
     return {"impulse": float(impulse), "exhaustion_ratio": float(exhaustion_ratio), "dist_ema": float(dist_ema), "rsi": float(rsi_val), "last_green": bool(candles[-1]["green"]), "n_candles": len(candles), "is_doji": int(is_doji), "fake_impulse": int(fake_impulse)}
 
 def save_sample(photo_path, platform="pocket"):
     candles = extract_candles_from_screen(photo_path)
     feat = features_from_candles(candles)
-    if not feat: return False
+    if not feat:
+        return False
     feat["platform"] = platform
     feat["time"] = datetime.now().isoformat()
     feat["label"] = ""
     df = pd.DataFrame([feat])
-    if os.path.exists(DATASET): df.to_csv(DATASET, mode='a', header=False, index=False)
-    else: df.to_csv(DATASET, index=False)
+    if os.path.exists(DATASET):
+        df.to_csv(DATASET, mode='a', header=False, index=False)
+    else:
+        df.to_csv(DATASET, index=False)
     return True
 
 def train_model():
-    if not os.path.exists(DATASET): return {"msg": "Нет данных. Кидай фото через ОБУЧЕНИЕ"}
+    if not os.path.exists(DATASET):
+        return {"msg": "Нет данных. Кидай фото через ОБУЧЕНИЕ"}
     df = pd.read_csv(DATASET)
     df = df[df["label"] != ""]
-    if len(df) < 5: return {"msg": f"Мало размеченных фото: {len(df)}/20. После каждого фото пиши ВВЕРХ или ВНИЗ"}
+    if len(df) < 5:
+        return {"msg": f"Мало размеченных фото: {len(df)}/20. После каждого фото пиши ВВЕРХ или ВНИЗ"}
     best = {"thr": 0.5, "acc": 0}
     for thr in [0.4, 0.5, 0.6, 0.7, 0.8]:
         pred = []
         for _, r in df.iterrows():
-            if r["impulse"] > 30 and r["exhaustion_ratio"] < thr: pred.append("ВНИЗ" if r["dist_ema"] > 0 else "ВВЕРХ")
-            else: pred.append("ЖДИ")
+            if r["impulse"] > 30 and r["exhaustion_ratio"] < thr:
+                pred.append("ВНИЗ" if r["dist_ema"] > 0 else "ВВЕРХ")
+            else:
+                pred.append("ЖДИ")
         acc = (np.array(pred) == df["label"].values).mean()
-        if acc > best["acc"]: best = {"thr": thr, "acc": float(acc)}
+        if acc > best["acc"]:
+            best = {"thr": thr, "acc": float(acc)}
     model = {"exhaustion_thr": best["thr"], "accuracy_on_train": best["acc"], "samples": len(df)}
     json.dump(model, open(MODEL_FILE, "w"))
     return model
 
 def get_thr():
     if os.path.exists(MODEL_FILE):
-        try: return json.load(open(MODEL_FILE)).get("exhaustion_thr", 0.5)
-        except: return 0.5
+        try:
+            return json.load(open(MODEL_FILE)).get("exhaustion_thr", 0.5)
+        except:
+            return 0.5
     return 0.5
 
 def analyze_otc_screenshot(photo_path):
     img = cv2.imread(photo_path)
-    if img is None: return None, 0
+    if img is None:
+        return None, 0
     h, w = img.shape[:2]
     chart = img[int(h*0.18):int(h*0.65), 0:int(w*0.95)]
-    if chart.size == 0: return None, 0
+    if chart.size == 0:
+        return None, 0
     hsv = cv2.cvtColor(chart, cv2.COLOR_BGR2HSV)
     green_mask = cv2.inRange(hsv, np.array([35,50,50]), np.array([85,255,255]))
     red_mask1 = cv2.inRange(hsv, np.array([0,50,50]), np.array([10,255,255]))
@@ -164,9 +213,11 @@ def analyze_otc_screenshot(photo_path):
             prices.append(chart.shape[0] - col.mean())
             greens.append(green_mask[:, x].max() > 0)
             sizes.append(col.max() - col.min())
-    if len(prices) < 20: return None, 0
+    if len(prices) < 20:
+        return None, 0
     prices, greens, sizes = prices[::-1], greens[::-1], sizes[::-1]
-    if time.time() - sniper_state["last_signal_time"] < 120: return "СТОП, ПОДОЖДИ 2 МИН ПОСЛЕ СИГНАЛА", 0
+    if time.time() - sniper_state["last_signal_time"] < 120:
+        return "СТОП, ПОДОЖДИ 2 МИН ПОСЛЕ СИГНАЛА", 0
     last_size = sizes[-1]
     avg_prev = np.mean(sizes[-7:-1]) if len(sizes) >= 7 else last_size
     is_doji = last_size < avg_prev * 0.4
@@ -177,7 +228,8 @@ def analyze_otc_screenshot(photo_path):
     deltas = np.diff(prices[-10:])
     exhaustion = abs(deltas[-1]) / (abs(deltas[-2]) + 1e-6) if len(deltas) >= 2 else 1
     thr = get_thr()
-    if exhaustion < thr and impulse_before > 20: return ("ВНИЗ" if greens[-1] else "ВВЕРХ"), 0
+    if exhaustion < thr and impulse_before > 20:
+        return ("ВНИЗ" if greens[-1] else "ВВЕРХ"), 0
     return None, 0
 
 async def send_text(chat_id, text):
@@ -199,10 +251,12 @@ async def check_major_signal(pair, chat_id):
     for i in range(200, len(prices)-5):
         if rsi.iloc[i] <= 30 and prices[i] < ema200.iloc[i]:
             total += 1
-            if prices[i+3] > prices[i]: wins += 1
+            if prices[i+3] > prices[i]:
+                wins += 1
         elif rsi.iloc[i] >= 70 and prices[i] > ema200.iloc[i]:
             total += 1
-            if prices[i+3] < prices[i]: wins += 1
+            if prices[i+3] < prices[i]:
+                wins += 1
     if total < 20:
         await send_text(chat_id, f"{pair}: мало статистики ({total}), жди")
         return
@@ -219,7 +273,8 @@ async def collect_majors_loop():
         try:
             for pair in MAJORS:
                 prices = await asyncio.to_thread(get_real_candles, pair)
-                if not prices or len(prices) < 100: continue
+                if not prices or len(prices) < 100:
+                    continue
                 window = prices[-60:-3]
                 future = prices[-3] - prices[-6]
                 label = "ВВЕРХ" if future > 0 else "ВНИЗ"
@@ -229,11 +284,14 @@ async def collect_majors_loop():
                 ema20 = pd.Series(window).ewm(span=20).mean().iloc[-1]
                 dist_ema = window[-1] - ema20
                 rsi_val = calc_rsi(window).iloc[-1]
-                if np.isnan(rsi_val): rsi_val = 50
+                if np.isnan(rsi_val):
+                    rsi_val = 50
                 row = {"impulse": float(impulse), "exhaustion_ratio": float(exhaustion_ratio), "dist_ema": float(dist_ema), "rsi": float(rsi_val), "last_green": bool(window[-1] > window[-2]), "n_candles": len(window), "is_doji": 0, "fake_impulse": 0, "platform": pair, "time": datetime.now().isoformat(), "label": label}
                 df = pd.DataFrame([row])
-                if os.path.exists(DATASET): df.to_csv(DATASET, mode='a', header=False, index=False)
-                else: df.to_csv(DATASET, index=False)
+                if os.path.exists(DATASET):
+                    df.to_csv(DATASET, mode='a', header=False, index=False)
+                else:
+                    df.to_csv(DATASET, index=False)
                 print(f"Собрал {pair} -> {label}")
             m = train_model()
             print(f"Модель после сбора: {m}")
@@ -259,10 +317,12 @@ async def analyze_all(chat_id):
         for i in range(200, len(prices)-5):
             if rsi.iloc[i] <= 30 and prices[i] < ema200.iloc[i]:
                 total += 1
-                if prices[i+3] > prices[i]: wins += 1
+                if prices[i+3] > prices[i]:
+                    wins += 1
             elif rsi.iloc[i] >= 70 and prices[i] > ema200.iloc[i]:
                 total += 1
-                if prices[i+3] < prices[i]: wins += 1
+                if prices[i+3] < prices[i]:
+                    wins += 1
         if total < 20:
             return (pair, 0, total, "мало статистики", float(curr_rsi))
         wr = wins/total*100
@@ -307,7 +367,8 @@ async def telegram_listener():
                     offset = upd["update_id"] + 1
                     msg = upd.get("message", {})
                     chat_id = msg.get("chat", {}).get("id")
-                    if not chat_id: continue
+                    if not chat_id:
+                        continue
                     text = msg.get("text", "").strip().upper()
                     if text == "/START":
                         await send_text(chat_id, "Привет\nEUR/USD - реал\nOTC - скрин\nТИКАЙ - сидеть с тобой 5 мин на Покете\nОБУЧЕНИЕ - фото\nСИНХРОН - заходить со мной\nОБУЧИТЬ - обучить\nАНАЛИЗ - все 17 пар")
@@ -394,26 +455,29 @@ async def telegram_listener():
                         open("/tmp/screen.jpg", "wb").write(photo_data.content)
                         if sniper_state["mode"] == "train":
                             ok = save_sample("/tmp/screen.jpg", platform="pocket")
-                            if ok: await send_text(chat_id, "Фото сохранил для обучения. Теперь напиши ВВЕРХ или ВНИЗ что было на следующей свече")
-                            else: await send_text(chat_id, "Не смог вытащить свечи с фото. Скинь другой скрин 15м")
+                            if ok:
+                                await send_text(chat_id, "Фото сохранил для обучения. Теперь напиши ВВЕРХ или ВНИЗ что было на следующей свече")
+                            else:
+                                await send_text(chat_id, "Не смог вытащить свечи с фото. Скинь другой скрин 15м")
+                            sniper_state["waiting_photo"] = False
+                            sniper_state["mode"] = None
                         elif sniper_state["mode"] == "sync":
                             await send_text(chat_id, "Фото входа сохранил. Теперь заходи на демо и напиши ВХОД ВНИЗ или ВХОД ВВЕРХ")
+                            sniper_state["waiting_photo"] = False
+                            sniper_state["mode"] = None
                         else:
                             direction, rsi = analyze_otc_screenshot("/tmp/screen.jpg")
-                            if direction and "СТОП" in direction: await send_text(chat_id, direction)
+                            if direction and "СТОП" in direction:
+                                await send_text(chat_id, direction)
                             elif direction:
                                 await send_text(chat_id, f"OTC СИГНАЛ\n{direction}\nЭкспирация 1-2м\nТолько демка")
                                 sniper_state["last_signal_time"] = time.time()
-                            else: await send_text(chat_id, "ЖДИ. Нет сетапа дожи+фейк")
-                            # если режим ТИКАЙ, сразу ждём следующий скрин
+                            else:
+                                await send_text(chat_id, "ЖДИ. Нет сетапа дожи+фейк")
                             if sniper_state["watch_chat"]:
                                 sniper_state["waiting_photo"] = True
                                 sniper_state["mode"] = "otc"
                             else:
-                                sniper_state["waiting_photo"] = False
-                                sniper_state["mode"] = None
-                        if sniper_state["mode"] != "otc" or not sniper_state["watch_chat"]:
-                            if sniper_state["mode"] == "train" or sniper_state["mode"] == "sync":
                                 sniper_state["waiting_photo"] = False
                                 sniper_state["mode"] = None
             except Exception as e:
