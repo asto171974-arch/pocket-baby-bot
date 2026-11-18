@@ -22,7 +22,7 @@ Thread(target=lambda: HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 10000)))
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TWELVE_KEY = os.getenv("TWELVEDATA_API_KEY")
 MAJORS = ["EUR/USD", "GBP/USD", "USD/JPY", "EUR/JPY","EUR/CAD","EUR/GBP","USD/SEK","AUD/JPY","USD/ZAR","USD/CNH","CAD/JPY","USD/CHF","GBP/JPY","NZD/USD","USD/CAD","GBP/CHF", "AUD/USD"]
-sniper_state = {"waiting_photo": False, "chat_id": None, "last_signal_time": 0, "mode": None, "sync_time": 0, "sync_dir": None, "sync_chat": None}
+sniper_state = {"waiting_photo": False, "chat_id": None, "last_signal_time": 0, "mode": None, "sync_time": 0, "sync_dir": None, "sync_chat": None, "watch_until": 0, "watch_chat": None}
 TRAIN_DIR = "/tmp/train"
 os.makedirs(TRAIN_DIR, exist_ok=True)
 DATASET = os.path.join(TRAIN_DIR, "dataset.csv")
@@ -63,7 +63,6 @@ def get_from_twelve(pair):
         return None
 
 def get_real_candles(pair):
-    # Сначала ТВ, если не вышло - TwelveData
     prices = get_from_tv(pair)
     if prices and len(prices) >= 300:
         return prices
@@ -295,6 +294,16 @@ async def analyze_all(chat_id):
         text += f"\nБро, сейчас все в жди. Лучший {best[0]} с {best[1]:.0f}%, но RSI не дошел. Не заходи."
     await send_text(chat_id, text)
 
+async def watch_loop():
+    while True:
+        await asyncio.sleep(30)
+        if sniper_state["watch_chat"] and time.time() < sniper_state["watch_until"]:
+            left = int(sniper_state["watch_until"] - time.time())
+            await send_text(sniper_state["watch_chat"], f"Тикаю... осталось {left} сек. Кидай скрин Покет 1м, я разберу")
+        elif sniper_state["watch_chat"] and time.time() >= sniper_state["watch_until"]:
+            await send_text(sniper_state["watch_chat"], "5 минут прошло, вырубился. Напиши ТИКАЙ ещё раз если надо")
+            sniper_state["watch_chat"] = None
+
 async def telegram_listener():
     offset = 0
     print("Бот слушает...")
@@ -310,10 +319,11 @@ async def telegram_listener():
                     if not chat_id: continue
                     text = msg.get("text", "").strip().upper()
                     if text == "/START":
-                        await send_text(chat_id, "Привет\nEUR/USD - реал\nOTC - скрин\nОБУЧЕНИЕ - фото\nСИНХРОН - заходить со мной\nОБУЧИТЬ - обучить\nАНАЛИЗ - все 17 пар")
+                        await send_text(chat_id, "Привет\nEUR/USD - реал\nOTC - скрин\nТИКАЙ - сидеть с тобой 5 мин на Покете\nОБУЧЕНИЕ - фото\nСИНХРОН - заходить со мной\nОБУЧИТЬ - обучить\nАНАЛИЗ - все 17 пар")
                     elif text == "/STOP":
                         sniper_state["waiting_photo"] = False
                         sniper_state["mode"] = None
+                        sniper_state["watch_chat"] = None
                         await send_text(chat_id, "Остановлен")
                     elif text == "АНАЛИЗ":
                         asyncio.create_task(analyze_all(chat_id))
@@ -325,6 +335,13 @@ async def telegram_listener():
                         sniper_state["mode"] = "otc"
                         sniper_state["chat_id"] = chat_id
                         await send_text(chat_id, "Кидай скрин EUR/USD-OTC 1м")
+                    elif text in ["ТИКАЙ", "ПОКЕТ"]:
+                        sniper_state["waiting_photo"] = True
+                        sniper_state["mode"] = "otc"
+                        sniper_state["chat_id"] = chat_id
+                        sniper_state["watch_until"] = time.time() + 300
+                        sniper_state["watch_chat"] = chat_id
+                        await send_text(chat_id, "Режим ТИКАЙ на 5 мин. Кидай скрин Покет 1м, я буду тикать и разбирать каждый")
                     elif text == "ОБУЧЕНИЕ":
                         sniper_state["waiting_photo"] = True
                         sniper_state["mode"] = "train"
@@ -397,8 +414,17 @@ async def telegram_listener():
                                 await send_text(chat_id, f"OTC СИГНАЛ\n{direction}\nЭкспирация 1-2м\nТолько демка")
                                 sniper_state["last_signal_time"] = time.time()
                             else: await send_text(chat_id, "ЖДИ. Нет сетапа дожи+фейк")
-                        sniper_state["waiting_photo"] = False
-                        sniper_state["mode"] = None
+                            # если режим ТИКАЙ, сразу ждём следующий скрин
+                            if sniper_state["watch_chat"]:
+                                sniper_state["waiting_photo"] = True
+                                sniper_state["mode"] = "otc"
+                            else:
+                                sniper_state["waiting_photo"] = False
+                                sniper_state["mode"] = None
+                        if sniper_state["mode"] != "otc" or not sniper_state["watch_chat"]:
+                            if sniper_state["mode"] == "train" or sniper_state["mode"] == "sync":
+                                sniper_state["waiting_photo"] = False
+                                sniper_state["mode"] = None
             except Exception as e:
                 print("Ошибка:", e)
                 await asyncio.sleep(3)
@@ -412,7 +438,7 @@ async def sniper_loop():
                 sniper_state["sync_time"] = time.time() + 9999
 
 async def main():
-    await asyncio.gather(telegram_listener(), sniper_loop(), collect_majors_loop())
+    await asyncio.gather(telegram_listener(), sniper_loop(), collect_majors_loop(), watch_loop())
 
 if __name__ == "__main__":
     asyncio.run(main())
