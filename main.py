@@ -41,8 +41,6 @@ def calc_rsi(prices, period=14):
     return 100 - (100 / (1 + rs))
 
     def get_from_tv(pair):
-    # ТВ через websocket, без тяжёлого пакета
-    # Пока отключили, чтобы Render собрался. TwelveData сейчас основной.
     return None
 
 def get_from_twelve(pair):
