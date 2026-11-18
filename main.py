@@ -18,7 +18,7 @@ Thread(target=lambda: HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 10000)))
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TWELVE_KEY = os.getenv("TWELVEDATA_API_KEY")
-MAJORS = ["EUR/USD", "GBP/USD", "USD/JPY", "EUR/JPY", "AUD/USD"]
+MAJORS = ["EUR/USD", "GBP/USD", "USD/JPY", "EUR/JPY","EUR/CAD","EUR/GBP","USD/SEK","AUD/JPY","USD/ZAR","USD/CNH","CAD/JPY","USD/CHF","GBP/JPY","NZD/USD","USD/CAD","GBP/CHF", "AUD/USD"]
 sniper_state = {"waiting_photo": False, "chat_id": None, "last_signal_time": 0, "mode": None, "sync_time": 0, "sync_dir": None, "sync_chat": None}
 TRAIN_DIR = "/tmp/train"
 os.makedirs(TRAIN_DIR, exist_ok=True)
@@ -165,7 +165,7 @@ async def send_text(chat_id, text):
     async with httpx.AsyncClient() as c:
         await c.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
 
-async def check_major_signal(pair, chat_id):
+async def check_major_signal(pair, chat_id):                    
     if not is_market_open():
         await send_text(chat_id, "Реал закрыт до понедельника. Пиши OTC и кидай скрин.")
         return
@@ -221,7 +221,53 @@ async def collect_majors_loop():
         except Exception as e:
             print("Ошибка сбора:", e)
         await asyncio.sleep(300)
-
+async def analyze_all(chat_id):
+    await send_text(chat_id, "Бро, прогоняю все 5 мажоров... 10 сек")
+    results = []
+    if not is_market_open():
+        await send_text(chat_id, "Реал закрыт до понедельника. Пиши OTC и кидай скрин.")
+        return
+    for pair in MAJORS:
+        prices = get_real_candles(pair)
+        if not prices or len(prices) < 300:
+            results.append((pair, 0, 0, "нет свечей"))
+            continue
+        rsi = calc_rsi(prices)
+        ema200 = pd.Series(prices).ewm(span=200).mean()
+        curr_rsi = rsi.iloc[-1]
+        wins, total = 0, 0
+        for i in range(200, len(prices)-5):
+            if rsi.iloc[i] <= 30 and prices[i] < ema200.iloc[i]:
+                total += 1
+                if prices[i+3] > prices[i]: wins += 1
+            elif rsi.iloc[i] >= 70 and prices[i] > ema200.iloc[i]:
+                total += 1
+                if prices[i+3] < prices[i]: wins += 1
+        if total < 20:
+            results.append((pair, 0, total, "мало статистики"))
+            continue
+        wr = wins/total*100
+        direction = "ВВЕРХ" if curr_rsi <= 30 else "ВНИЗ"
+        if curr_rsi > 30 and curr_rsi < 70:
+            direction = "ЖДИ"
+        results.append((pair, wr, total, direction, curr_rsi))
+    # сортируем по винрейту
+    results_sorted = sorted([r for r in results if len(r) > 3], key=lambda x: x[1], reverse=True)
+    if not results_sorted:
+        await send_text(chat_id, "Все 5 - нет данных. Проверь ключ.")
+        return
+    best = results_sorted[0]
+    text = "РЕЗУЛЬТАТ ПО 5 МАЖОРАМ:\n\n"
+    for r in results:
+        if len(r) > 3:
+            text += f"{r[0]}: {r[3]} | RSI {r[4]:.1f} | Винрейт {r[1]:.0f}% ({r[2]})\n"
+        else:
+            text += f"{r[0]}: {r[3]}\n"
+    if best[1] >= 58 and best[3] != "ЖДИ":
+        text += f"\nБРО, ЗАХОДИ В {best[0]} -> {best[3]}\nВинрейт {best[1]:.0f}% - это твой сетап. Экспирация 3м"
+    else:
+        text += f"\nБро, сейчас все 5 в жди. Лучший {best[0]} с {best[1]:.0f}%, но RSI не дошел. Не заходи."
+    await send_text(chat_id, text)
 async def telegram_listener():
     offset = 0
     print("Бот слушает...")
@@ -241,8 +287,10 @@ async def telegram_listener():
                     elif text == "/STOP":
                         sniper_state["waiting_photo"] = False
                         sniper_state["mode"] = None
-                        await send_text(chat_id, "Остановлен")
-                    elif text in MAJORS:
+                        await send_text(chat_id, "Остановлен") 
+                    elif text == "АНАЛИЗ":
+                        asyncio.create_task(analyze_all(chat_id)) 
+                    elif text in MAJORS:                    
                         await send_text(chat_id, f"Проверяю {text} по реальным свечам...")
                         asyncio.create_task(check_major_signal(text, chat_id))
                     elif text == "OTC":
