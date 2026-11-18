@@ -7,8 +7,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 from zoneinfo import ZoneInfo
 try:
-    from tvdata import TvDataFeed, Interval
-    tv_feed = TvDataFeed()
+    from tvdata import websocket
     print("ТВ подключилось")
 except Exception as e:
     print(f"ТВ не подключилось, работаем только на TwelveData: {e}")
@@ -41,23 +40,10 @@ def calc_rsi(prices, period=14):
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
-def get_from_tv(pair):
-    if tv_feed is None:
-        return None
-    try:
-        symbol = pair.replace("/", "")
-        df = None
-        try:
-            df = tv_feed.get_df(symbol=symbol, exchange='FX', interval=Interval.in_1_minute, n_bars=1000)
-        except:
-            res = tv_feed.get_quote(symbol=symbol, exchange='FX', interval=Interval.in_1_minute, n_bars=1000)
-            df = res[0] if isinstance(res, tuple) else res
-        if df is None or len(df) < 300:
-            return None
-        return df['close'].tolist()
-    except Exception as e:
-        print(f"ТВ ошибка {pair}: {e}")
-        return None
+    def get_from_tv(pair):
+    # ТВ через websocket, без тяжёлого пакета
+    # Пока отключили, чтобы Render собрался. TwelveData сейчас основной.
+    return None
 
 def get_from_twelve(pair):
     try:
