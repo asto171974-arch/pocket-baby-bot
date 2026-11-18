@@ -6,6 +6,9 @@ from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from tvdata import TvDataFeed, Interval
+
+tv_feed = TvDataFeed()
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -33,13 +36,39 @@ def calc_rsi(prices, period=14):
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
-def get_real_candles(pair):
+def get_from_tv(pair):
     try:
+        symbol = pair.replace("/", "")
+        df = None
+        try:
+            df = tv_feed.get_df(symbol=symbol, exchange='FX', interval=Interval.in_1_minute, n_bars=1000)
+        except:
+            res = tv_feed.get_quote(symbol=symbol, exchange='FX', interval=Interval.in_1_minute, n_bars=1000)
+            df = res[0] if isinstance(res, tuple) else res
+        if df is None or len(df) < 300:
+            return None
+        return df['close'].tolist()
+    except Exception as e:
+        print(f"ТВ ошибка {pair}: {e}")
+        return None
+
+def get_from_twelve(pair):
+    try:
+        if not TWELVE_KEY: return None
         url = f"https://api.twelvedata.com/time_series?symbol={pair}&interval=1min&outputsize=1000&apikey={TWELVE_KEY}"
         r = httpx.get(url, timeout=15).json()
         if 'values' not in r: return None
         return [float(x['close']) for x in reversed(r['values'])]
-    except: return None
+    except:
+        return None
+
+def get_real_candles(pair):
+    # Сначала ТВ, если не вышло - TwelveData
+    prices = get_from_tv(pair)
+    if prices and len(prices) >= 300:
+        return prices
+    print(f"{pair}: ТВ не отдало, иду в TwelveData")
+    return get_from_twelve(pair)
 
 def is_market_open():
     now = datetime.now(ZoneInfo("Europe/Moscow"))
@@ -165,13 +194,13 @@ async def send_text(chat_id, text):
     async with httpx.AsyncClient() as c:
         await c.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
 
-async def check_major_signal(pair, chat_id):                    
+async def check_major_signal(pair, chat_id):
     if not is_market_open():
         await send_text(chat_id, "Реал закрыт до понедельника. Пиши OTC и кидай скрин.")
         return
-    prices = get_real_candles(pair)
+    prices = await asyncio.to_thread(get_real_candles, pair)
     if not prices or len(prices) < 300:
-        await send_text(chat_id, "Не смог взять свечи. Проверь TWELVEDATA_API_KEY")
+        await send_text(chat_id, "Не смог взять свечи ни с ТВ ни с TwelveData")
         return
     rsi = calc_rsi(prices)
     ema200 = pd.Series(prices).ewm(span=200).mean()
@@ -199,7 +228,7 @@ async def collect_majors_loop():
     while True:
         try:
             for pair in MAJORS:
-                prices = get_real_candles(pair)
+                prices = await asyncio.to_thread(get_real_candles, pair)
                 if not prices or len(prices) < 100: continue
                 window = prices[-60:-3]
                 future = prices[-3] - prices[-6]
@@ -223,11 +252,10 @@ async def collect_majors_loop():
         await asyncio.sleep(300)
 
 async def analyze_all(chat_id):
-    await send_text(chat_id, "Бро, прогоняю все 17 мажоров... 15 сек")
+    await send_text(chat_id, "Бро, прогоняю все 17 мажоров (ТВ + Twelve)... 20 сек")
     if not is_market_open():
         await send_text(chat_id, "Реал закрыт до понедельника. Пиши OTC и кидай скрин.")
         return
-
     async def fetch_and_calc(pair):
         prices = await asyncio.to_thread(get_real_candles, pair)
         if not prices or len(prices) < 300:
@@ -252,11 +280,10 @@ async def analyze_all(chat_id):
         if 30 < curr_rsi < 70:
             direction = "ЖДИ"
         return (pair, wr, total, direction, float(curr_rsi))
-
     results = await asyncio.gather(*(fetch_and_calc(p) for p in MAJORS))
     results_sorted = sorted([r for r in results if r[1] > 0], key=lambda x: x[1], reverse=True)
     if not results_sorted:
-        await send_text(chat_id, "Все 17 - нет данных. Проверь ключ.")
+        await send_text(chat_id, "Все 17 - ни ТВ ни Twelve не отдало. Проверь ключи")
         return
     best = results_sorted[0]
     text = "РЕЗУЛЬТАТ ПО 17 МАЖОРАМ:\n\n"
@@ -287,11 +314,11 @@ async def telegram_listener():
                     elif text == "/STOP":
                         sniper_state["waiting_photo"] = False
                         sniper_state["mode"] = None
-                        await send_text(chat_id, "Остановлен") 
+                        await send_text(chat_id, "Остановлен")
                     elif text == "АНАЛИЗ":
-                        asyncio.create_task(analyze_all(chat_id)) 
-                    elif text in MAJORS:                    
-                        await send_text(chat_id, f"Проверяю {text} по реальным свечам...")
+                        asyncio.create_task(analyze_all(chat_id))
+                    elif text in MAJORS:
+                        await send_text(chat_id, f"Проверяю {text}...")
                         asyncio.create_task(check_major_signal(text, chat_id))
                     elif text == "OTC":
                         sniper_state["waiting_photo"] = True
