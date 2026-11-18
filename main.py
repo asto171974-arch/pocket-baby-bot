@@ -6,10 +6,15 @@ from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from tvdata import TvDataFeed, Interval
-
-tv_feed = TvDataFeed()
-
+try:
+    from tvdata import TvDataFeed, Interval
+    tv_feed = TvDataFeed()
+    print("ТВ подключилось")
+except Exception as e:
+    print(f"ТВ не подключилось, работаем только на TwelveData: {e}")
+    tv_feed = None
+    TvDataFeed = None
+    Interval = None
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -37,6 +42,8 @@ def calc_rsi(prices, period=14):
     return 100 - (100 / (1 + rs))
 
 def get_from_tv(pair):
+    if tv_feed is None:
+        return None
     try:
         symbol = pair.replace("/", "")
         df = None
