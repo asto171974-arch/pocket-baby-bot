@@ -6,9 +6,6 @@ from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from tvDataFeed import TvDataFeed, Interval
-
-tv_feed = TvDataFeed()
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
