@@ -6,7 +6,7 @@ from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from tvdata import TvDataFeed, Interval
+from tvDataFeed import TvDataFeed, Interval
 
 tv_feed = TvDataFeed()
 
