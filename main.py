@@ -1,18 +1,20 @@
-import os, time, asyncio, cv2, json, re, random, string
+import os, time, asyncio, cv2, json
 import pandas as pd
 import numpy as np
 import httpx
-import websocket
 from threading import Thread
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from tvdata import TvDataFeed, Interval
+
+tv_feed = TvDataFeed()
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Brodyaga v3 running")
+        self.wfile.write(b"Brodyaga Stealth Scout running")
     def log_message(self, *args): pass
 
 Thread(target=lambda: HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 10000))), HealthHandler).serve_forever(), daemon=True).start()
@@ -34,39 +36,18 @@ def calc_rsi(prices, period=14):
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
-def tv_frame(func, params):
-    payload = json.dumps({"func": func, "params": params}, separators=(',', ':'))
-    return f"~m~{len(payload)}~m~{payload}"
-
 def get_from_tv(pair):
     try:
-        symbol = "FX:" + pair.replace("/", "")
-        session = ''.join(random.choices(string.ascii_lowercase, k=12))
-        ws = websocket.create_connection("wss://data.tradingview.com/socket.io/websocket?EIO=4&transport=websocket", timeout=10)
-        ws.recv()
-        ws.send('42["set_session","' + session + '"]')
-        ws.recv()
-        ws.send(tv_frame("resolve_symbol", [session, "s1", symbol]))
-        ws.send(tv_frame("create_series", [session, "s1", "1", "s1", 1000]))
-        closes = []
-        end = time.time() + 8
-        while time.time() < end and len(closes) < 1000:
-            msg = ws.recv()
-            if '"s"' in msg and '"c"' in msg:
-                try:
-                    data = json.loads(msg.split("42",1)[1])
-                    for item in data[1].get("s", []):
-                        c = item.get("c")
-                        if c and len(c) >= 5:
-                            closes.append(float(c[4]))
-                except:
-                    pass
-            if len(closes) >= 300:
-                break
-        ws.close()
-        if len(closes) >= 300:
-            return closes[-1000:]
-        return None
+        symbol = pair.replace("/", "")
+        df = None
+        try:
+            df = tv_feed.get_df(symbol=symbol, exchange='FX', interval=Interval.in_1_minute, n_bars=1000)
+        except:
+            res = tv_feed.get_quote(symbol=symbol, exchange='FX', interval=Interval.in_1_minute, n_bars=1000)
+            df = res[0] if isinstance(res, tuple) else res
+        if df is None or len(df) < 300:
+            return None
+        return df['close'].tolist()
     except Exception as e:
         print(f"ТВ ошибка {pair}: {e}")
         return None
@@ -224,25 +205,25 @@ def analyze_otc_screenshot(photo_path):
     impulse_before = abs(prices[-3] - prices[-7]) if len(prices) >= 7 else 0
     fake = greens[-1] == greens[-2]
     if is_doji and fake and impulse_before > 15:
-        return ("ВНИЗ" if greens[-1] else "ВВЕРХ"), 0
+        return ("ВНИЗ" if greens[-1] else "ВВЕРХ"), 85
     deltas = np.diff(prices[-10:])
     exhaustion = abs(deltas[-1]) / (abs(deltas[-2]) + 1e-6) if len(deltas) >= 2 else 1
     thr = get_thr()
     if exhaustion < thr and impulse_before > 20:
-        return ("ВНИЗ" if greens[-1] else "ВВЕРХ"), 0
+        return ("ВНИЗ" if greens[-1] else "ВВЕРХ"), 85
     return None, 0
 
 async def send_text(chat_id, text):
     async with httpx.AsyncClient() as c:
-        await c.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
+        await c.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": text})
 
 async def check_major_signal(pair, chat_id):
     if not is_market_open():
-        await send_text(chat_id, "Реал закрыт до понедельника. Пиши OTC и кидай скрин.")
+        await send_text(chat_id, "Форекс закрыт до понедельника. Пиши OTC и кидай скрин.")
         return
     prices = await asyncio.to_thread(get_real_candles, pair)
     if not prices or len(prices) < 300:
-        await send_text(chat_id, "Не смог взять свечи ни с ТВ ни с TwelveData")
+        await send_text(chat_id, f"Не удалось получить свечи для {pair}.")
         return
     rsi = calc_rsi(prices)
     ema200 = pd.Series(prices).ewm(span=200).mean()
@@ -258,20 +239,62 @@ async def check_major_signal(pair, chat_id):
             if prices[i+3] < prices[i]:
                 wins += 1
     if total < 20:
-        await send_text(chat_id, f"{pair}: мало статистики ({total}), жди")
+        await send_text(chat_id, f"{pair}: недостаточно статистики ({total}), жди.")
         return
     wr = wins/total*100
     if wr < 58:
-        await send_text(chat_id, f"{pair}: винрейт {wr:.0f}% - слабый, не захожу")
+        await send_text(chat_id, f"{pair}: винрейт {wr:.0f}% - слабый, пропускаем.")
         return
     direction = "ВВЕРХ" if curr_rsi <= 30 else "ВНИЗ"
-    await send_text(chat_id, f"МАЖОР {pair}\nRSI: {curr_rsi:.1f}\n{direction}\nВинрейт: {wr:.0f}% на {total} сделках\nЭкспирация 3м")
+    await send_text(chat_id, f"МАЖОР {pair}\nRSI: {curr_rsi:.1f}\nСовет: {direction}\nВинрейт: {wr:.0f}% ({total} сделок)\nЭкспирация: 3 мин")
+
+async def analyze_all(chat_id):
+    await send_text(chat_id, "Сканирую все 17 мажоров (ТВ + Twelve)... Подожди ~20 секунд.")
+    if not is_market_open():
+        await send_text(chat_id, "Форекс закрыт.")
+        return
+    async def fetch_and_calc(pair):
+        prices = await asyncio.to_thread(get_real_candles, pair)
+        if not prices or len(prices) < 300:
+            return (pair, 0, 0, "нет данных", 0)
+        rsi = calc_rsi(prices)
+        ema200 = pd.Series(prices).ewm(span=200).mean()
+        curr_rsi = rsi.iloc[-1]
+        if pd.isna(curr_rsi):
+            curr_rsi = 50
+        wins, total = 0, 0
+        for i in range(200, len(prices)-5):
+            if rsi.iloc[i] <= 30 and prices[i] < ema200.iloc[i]:
+                total += 1
+                if prices[i+3] > prices[i]:
+                    wins += 1
+            elif rsi.iloc[i] >= 70 and prices[i] > ema200.iloc[i]:
+                total += 1
+                if prices[i+3] < prices[i]:
+                    wins += 1
+        if total < 20:
+            return (pair, 0, total, "мало данных", float(curr_rsi))
+        wr = wins/total*100
+        direction = "ВВЕРХ" if curr_rsi <= 30 else ("ВНИЗ" if curr_rsi >= 70 else "ЖДИ")
+        return (pair, wr, total, direction, float(curr_rsi))
+    results = await asyncio.gather(*(fetch_and_calc(p) for p in MAJORS))
+    results_sorted = sorted([r for r in results if r[1] > 0], key=lambda x: x[1], reverse=True)
+    text = "ОТЧЕТ ПО 17 МАЖОРАМ:\n\n"
+    for r in results:
+        text += f"{r[0]}: {r[3]} | RSI: {r[4]:.1f} | Винрейт: {r[1]:.0f}%\n"
+    if results_sorted:
+        best = results_sorted[0]
+        if best[1] >= 58 and "ЖДИ" not in best[3]:
+            text += f"\nЛУЧШИЙ СЕТАП: {best[0]} -> {best[3]} (Винрейт {best[1]:.0f}%)"
+        else:
+            text += f"\nСейчас идеальных точек нет. Лучший: {best[0]} ({best[1]:.0f}%)."
+    await send_text(chat_id, text)
 
 async def collect_majors_loop():
-    print("Ночной сбор мажоров запущен...")
+    print("Фоновый сборщик запущен...")
     while True:
         try:
-            for pair in MAJORS:
+            for pair in MAJORS[:5]:
                 prices = await asyncio.to_thread(get_real_candles, pair)
                 if not prices or len(prices) < 100:
                     continue
@@ -292,68 +315,28 @@ async def collect_majors_loop():
                     df.to_csv(DATASET, mode='a', header=False, index=False)
                 else:
                     df.to_csv(DATASET, index=False)
-                print(f"Собрал {pair} -> {label}")
-            m = train_model()
-            print(f"Модель после сбора: {m}")
+            train_model()
         except Exception as e:
             print("Ошибка сбора:", e)
-        await asyncio.sleep(300)
-
-async def analyze_all(chat_id):
-    await send_text(chat_id, "Бро, прогоняю все 17 мажоров (ТВ + Twelve)... 20 сек")
-    if not is_market_open():
-        await send_text(chat_id, "Реал закрыт до понедельника. Пиши OTC и кидай скрин.")
-        return
-    async def fetch_and_calc(pair):
-        prices = await asyncio.to_thread(get_real_candles, pair)
-        if not prices or len(prices) < 300:
-            return (pair, 0, 0, "нет свечей", 0)
-        rsi = calc_rsi(prices)
-        ema200 = pd.Series(prices).ewm(span=200).mean()
-        curr_rsi = rsi.iloc[-1]
-        if pd.isna(curr_rsi):
-            curr_rsi = 50
-        wins, total = 0, 0
-        for i in range(200, len(prices)-5):
-            if rsi.iloc[i] <= 30 and prices[i] < ema200.iloc[i]:
-                total += 1
-                if prices[i+3] > prices[i]:
-                    wins += 1
-            elif rsi.iloc[i] >= 70 and prices[i] > ema200.iloc[i]:
-                total += 1
-                if prices[i+3] < prices[i]:
-                    wins += 1
-        if total < 20:
-            return (pair, 0, total, "мало статистики", float(curr_rsi))
-        wr = wins/total*100
-        direction = "ВВЕРХ" if curr_rsi <= 30 else "ВНИЗ"
-        if 30 < curr_rsi < 70:
-            direction = "ЖДИ"
-        return (pair, wr, total, direction, float(curr_rsi))
-    results = await asyncio.gather(*(fetch_and_calc(p) for p in MAJORS))
-    results_sorted = sorted([r for r in results if r[1] > 0], key=lambda x: x[1], reverse=True)
-    if not results_sorted:
-        await send_text(chat_id, "Все 17 - ни ТВ ни Twelve не отдало. Проверь ключи")
-        return
-    best = results_sorted[0]
-    text = "РЕЗУЛЬТАТ ПО 17 МАЖОРАМ:\n\n"
-    for r in results:
-        text += f"{r[0]}: {r[3]} | RSI {r[4]:.1f} | Винрейт {r[1]:.0f}% ({r[2]})\n"
-    if best[1] >= 58 and best[3] != "ЖДИ":
-        text += f"\nБРО, ЗАХОДИ В {best[0]} -> {best[3]}\nВинрейт {best[1]:.0f}% - это твой сетап. Экспирация 3м"
-    else:
-        text += f"\nБро, сейчас все в жди. Лучший {best[0]} с {best[1]:.0f}%, но RSI не дошел. Не заходи."
-    await send_text(chat_id, text)
+        await asyncio.sleep(600)
 
 async def watch_loop():
     while True:
         await asyncio.sleep(30)
         if sniper_state["watch_chat"] and time.time() < sniper_state["watch_until"]:
             left = int(sniper_state["watch_until"] - time.time())
-            await send_text(sniper_state["watch_chat"], f"Тикаю... осталось {left} сек. Кидай скрин Покет 1м, я разберу")
+            await send_text(sniper_state["watch_chat"], f"Тикаю... осталось {left} сек. Кидай скрин Покет 1м")
         elif sniper_state["watch_chat"] and time.time() >= sniper_state["watch_until"]:
-            await send_text(sniper_state["watch_chat"], "5 минут прошло, вырубился. Напиши ТИКАЙ ещё раз если надо")
+            await send_text(sniper_state["watch_chat"], "5 минут прошло, вырубился. Напиши ТИКАЙ ещё раз")
             sniper_state["watch_chat"] = None
+
+async def sniper_loop():
+    while True:
+        await asyncio.sleep(10)
+        if sniper_state["sync_dir"] and sniper_state["sync_chat"]:
+            if time.time() - sniper_state["sync_time"] > 70:
+                await send_text(sniper_state["sync_chat"], "Ну что там? Пиши ПЛЮС или МИНУС")
+                sniper_state["sync_time"] = time.time() + 9999
 
 async def telegram_listener():
     offset = 0
@@ -371,22 +354,22 @@ async def telegram_listener():
                         continue
                     text = msg.get("text", "").strip().upper()
                     if text == "/START":
-                        await send_text(chat_id, "Привет\nEUR/USD - реал\nOTC - скрин\nТИКАЙ - сидеть с тобой 5 мин на Покете\nОБУЧЕНИЕ - фото\nСИНХРОН - заходить со мной\nОБУЧИТЬ - обучить\nАНАЛИЗ - все 17 пар")
+                        await send_text(chat_id, "Привет, Бродяга Stealth Scout\n\nEUR/USD - реал\nАНАЛИЗ - все 17 пар\nOTC - скрин\nТИКАЙ - сидеть 5 мин на Покете\nОБУЧЕНИЕ - фото\nСИНХРОН - заходить со мной\nОБУЧИТЬ - обучить\n/STOP - сброс")
                     elif text == "/STOP":
                         sniper_state["waiting_photo"] = False
                         sniper_state["mode"] = None
                         sniper_state["watch_chat"] = None
-                        await send_text(chat_id, "Остановлен")
+                        await send_text(chat_id, "Режим сброшен.")
                     elif text == "АНАЛИЗ":
                         asyncio.create_task(analyze_all(chat_id))
                     elif text in MAJORS:
-                        await send_text(chat_id, f"Проверяю {text}...")
+                        await send_text(chat_id, f"Анализирую {text} по ТВ...")
                         asyncio.create_task(check_major_signal(text, chat_id))
                     elif text == "OTC":
                         sniper_state["waiting_photo"] = True
                         sniper_state["mode"] = "otc"
                         sniper_state["chat_id"] = chat_id
-                        await send_text(chat_id, "Кидай скрин EUR/USD-OTC 1м")
+                        await send_text(chat_id, "Режим OTC активен. Скинь скрин 1м")
                     elif text in ["ТИКАЙ", "ПОКЕТ"]:
                         sniper_state["waiting_photo"] = True
                         sniper_state["mode"] = "otc"
@@ -398,12 +381,12 @@ async def telegram_listener():
                         sniper_state["waiting_photo"] = True
                         sniper_state["mode"] = "train"
                         sniper_state["chat_id"] = chat_id
-                        await send_text(chat_id, "Кидай фото 15м. После каждого фото напиши ВВЕРХ или ВНИЗ")
+                        await send_text(chat_id, "Кидай фото 15м. После каждого напиши ВВЕРХ или ВНИЗ")
                     elif text == "СИНХРОН":
                         sniper_state["waiting_photo"] = True
                         sniper_state["mode"] = "sync"
                         sniper_state["chat_id"] = chat_id
-                        await send_text(chat_id, "Режим СИНХРОН. Заходи на демо сам, кидай скрин В МОМЕНТ ВХОДА, потом напиши ВХОД ВНИЗ или ВХОД ВВЕРХ")
+                        await send_text(chat_id, "Режим СИНХРОН. Кидай скрин В МОМЕНТ ВХОДА, потом напиши ВХОД ВНИЗ или ВХОД ВВЕРХ")
                     elif text.startswith("ВХОД"):
                         direction = text.replace("ВХОД", "").strip()
                         if direction not in ["ВВЕРХ", "ВНИЗ"]:
@@ -426,9 +409,9 @@ async def telegram_listener():
                                 df = pd.read_csv(DATASET)
                                 df = df.drop(df.index[-1])
                                 df.to_csv(DATASET, index=False)
-                                await send_text(chat_id, "Понял, минус. Удалил, не буду так заходить")
+                                await send_text(chat_id, "Понял, минус. Удалил")
                             else:
-                                await send_text(chat_id, "Плюс! Записал твой вход, буду так же делать")
+                                await send_text(chat_id, "Плюс! Записал")
                                 m = train_model()
                                 await send_text(chat_id, f"Обучился: {m}")
                             sniper_state["sync_dir"] = None
@@ -441,7 +424,7 @@ async def telegram_listener():
                             if len(df) > 0 and df.iloc[-1]["label"] == "":
                                 df.iloc[-1, df.columns.get_loc("label")] = text
                                 df.to_csv(DATASET, index=False)
-                                await send_text(chat_id, f"Записал {text}. Кидай следующее фото или напиши ОБУЧИТЬ")
+                                await send_text(chat_id, f"Записал {text}. Кидай следующее фото или ОБУЧИТЬ")
                             else:
                                 await send_text(chat_id, "Сначала кидай фото")
                         else:
@@ -456,24 +439,24 @@ async def telegram_listener():
                         if sniper_state["mode"] == "train":
                             ok = save_sample("/tmp/screen.jpg", platform="pocket")
                             if ok:
-                                await send_text(chat_id, "Фото сохранил для обучения. Теперь напиши ВВЕРХ или ВНИЗ что было на следующей свече")
+                                await send_text(chat_id, "Фото сохранил. Теперь напиши ВВЕРХ или ВНИЗ")
                             else:
-                                await send_text(chat_id, "Не смог вытащить свечи с фото. Скинь другой скрин 15м")
+                                await send_text(chat_id, "Не смог вытащить свечи. Скинь другой скрин")
                             sniper_state["waiting_photo"] = False
                             sniper_state["mode"] = None
                         elif sniper_state["mode"] == "sync":
-                            await send_text(chat_id, "Фото входа сохранил. Теперь заходи на демо и напиши ВХОД ВНИЗ или ВХОД ВВЕРХ")
+                            await send_text(chat_id, "Фото входа сохранил. Теперь напиши ВХОД ВНИЗ или ВХОД ВВЕРХ")
                             sniper_state["waiting_photo"] = False
                             sniper_state["mode"] = None
                         else:
-                            direction, rsi = analyze_otc_screenshot("/tmp/screen.jpg")
+                            direction, conf = analyze_otc_screenshot("/tmp/screen.jpg")
                             if direction and "СТОП" in direction:
                                 await send_text(chat_id, direction)
                             elif direction:
-                                await send_text(chat_id, f"OTC СИГНАЛ\n{direction}\nЭкспирация 1-2м\nТолько демка")
+                                await send_text(chat_id, f"СОВЕТ ПО СКРИНУ\nСигнал: {direction}\nЭкспирация: 1-2 мин")
                                 sniper_state["last_signal_time"] = time.time()
                             else:
-                                await send_text(chat_id, "ЖДИ. Нет сетапа дожи+фейк")
+                                await send_text(chat_id, "ЖДИ. Сетапа нет")
                             if sniper_state["watch_chat"]:
                                 sniper_state["waiting_photo"] = True
                                 sniper_state["mode"] = "otc"
@@ -484,16 +467,8 @@ async def telegram_listener():
                 print("Ошибка:", e)
                 await asyncio.sleep(3)
 
-async def sniper_loop():
-    while True:
-        await asyncio.sleep(10)
-        if sniper_state["sync_dir"] and sniper_state["sync_chat"]:
-            if time.time() - sniper_state["sync_time"] > 70:
-                await send_text(sniper_state["sync_chat"], "Ну что там? Пиши ПЛЮС или МИНУС")
-                sniper_state["sync_time"] = time.time() + 9999
-
 async def main():
-    await asyncio.gather(telegram_listener(), sniper_loop(), collect_majors_loop(), watch_loop())
+    await asyncio.gather(telegram_listener(), collect_majors_loop(), watch_loop(), sniper_loop())
 
 if __name__ == "__main__":
     asyncio.run(main())
