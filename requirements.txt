@@ -1,6 +1,6 @@
-pandas==2.2.2
-httpx==0.27.2
-numpy==1.26.4
-opencv-python-headless==4.9.0.80
-tvdatafeed==2.1.0
+pandas
+httpx
+numpy
+opencv-python-headless
+tvdatafeed
 websocket-client
