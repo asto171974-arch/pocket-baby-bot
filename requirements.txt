@@ -2,5 +2,5 @@ pandas
 httpx
 numpy
 opencv-python-headless
-tvdata
+tvdatafeed==2.1.0
 websocket-client
